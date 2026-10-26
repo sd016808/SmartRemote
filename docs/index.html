@@ -1,0 +1,918 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>SmartRemote 遠端畫面</title>
+<!--
+  SmartRemote 的觀看頁 (本 repo 的 GitHub Pages：https://sd016808.github.io/SmartRemote/)
+  協定跟 Core/RemoteView.cs、Core/RemoteSession.cs 對應，改了兩邊要一起改；舊版的 Smart Hunter (只能看、JPEG) 連這一頁也要能用，要保持相容：
+  - 連線碼加上 v:2、ua；分享端是新版才會送 caps (有沒有影像軌、能不能遙控)，沒收到就照舊版處理
+-->
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --fg:#e8eaf0; --muted:#8b93a7;
+    --accent:#3d8bfd; --accent-fg:#fff; --ok:#2fbf71; --warn:#f0b429; --bad:#ef5350;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f3f5f9; --panel:#fff; --line:#dde2ea; --fg:#1b1f27; --muted:#667085; }
+  }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.5 system-ui, -apple-system, "Segoe UI", "Microsoft JhengHei", "PingFang TC", sans-serif; }
+  button, select, input, textarea { font:inherit; color:inherit; }
+  .hidden { display:none !important; }
+
+  /* ===== 連線畫面 ===== */
+  #login { min-height:100%; display:grid; place-items:center; padding:24px 16px; }
+  .card { width:100%; max-width:380px; background:var(--panel); border:1px solid var(--line);
+          border-radius:14px; padding:28px 24px; box-shadow:0 12px 32px rgba(0,0,0,.18); }
+  .brand { display:flex; align-items:center; gap:10px; margin-bottom:4px; }
+  .brand svg { flex:none; color:var(--accent); }
+  .card h1 { margin:0; font-size:20px; }
+  .sub { margin:0 0 18px; color:var(--muted); font-size:13px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:14px 0 6px; }
+  .field { position:relative; }
+  input, textarea { width:100%; padding:10px 12px; background:var(--bg); border:1px solid var(--line); border-radius:8px; outline:none; }
+  #login input { text-transform:uppercase; letter-spacing:.06em; }
+  input:focus, textarea:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(61,139,253,.25); }
+  .field input { padding-right:56px; }
+  .eye { position:absolute; right:4px; top:50%; transform:translateY(-50%); background:none; border:0;
+         color:var(--muted); padding:6px 8px; cursor:pointer; font-size:13px; }
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:7px 12px;
+         border-radius:8px; border:1px solid var(--line); background:var(--bg); cursor:pointer; white-space:nowrap; }
+  .btn:hover { border-color:var(--muted); }
+  .btn.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-fg); }
+  #go { width:100%; margin-top:22px; padding:11px; font-weight:600; }
+  .btn.danger { color:var(--bad); border-color:rgba(239,83,80,.45); }
+  .btn.on { background:var(--accent); border-color:var(--accent); color:var(--accent-fg); }
+  .btn:disabled { opacity:.6; cursor:default; }
+  .btn svg { flex:none; }
+  #loginMsg { min-height:1.5em; margin:12px 0 0; font-size:13px; color:var(--muted); text-align:center; }
+  #loginMsg.bad { color:var(--bad); }
+  .hint { margin:18px 0 0; padding-top:14px; border-top:1px solid var(--line); font-size:12px; color:var(--muted); }
+
+  /* ===== 觀看畫面 ===== */
+  #viewer { height:100%; display:flex; flex-direction:column; }
+  .bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 16px;
+         background:var(--panel); border-bottom:1px solid var(--line); }
+  .state { display:flex; align-items:center; gap:8px; flex:1; min-width:0; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); flex:none; }
+  .dot.ok { background:var(--ok); box-shadow:0 0 0 3px rgba(47,191,113,.22); }
+  .dot.warn { background:var(--warn); }
+  #stateText { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #stats { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  /* 手機：第一行狀態 + 流量，下面按鈕 */
+  @media (max-width:760px) {
+    .bar { padding:8px 12px; }
+    .controls { flex:1 1 100%; }
+    .controls > * { flex:1 1 auto; }
+    .btn .label { display:none; }
+  }
+  .bar select { padding:6px 8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); }
+  #stage { flex:1; min-height:0; overflow:auto; display:flex; background:#000; position:relative; outline:none; }
+  .media { display:block; margin:auto; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+  /* 顯示方式：填滿寬度 (太高就捲動) / 整個畫面 (縮到看得到全部) / 原始大小 (跟著瀏覽器縮放、手機可以兩指放大) */
+  .media.width { width:100%; height:auto; }
+  .media.fit { width:100%; height:100%; object-fit:contain; }
+  /* 遙控中：觸控不捲動畫面、不放大 (手勢都送到電腦) */
+  #stage.control { touch-action:none; }
+  #stage.control .media { touch-action:none; cursor:default; }
+  #overlay { position:absolute; inset:0; display:grid; place-items:center; padding:16px; text-align:center;
+             color:#fff; background:rgba(0,0,0,.5); font-size:14px; pointer-events:none; }
+  #note { position:absolute; left:50%; top:12px; transform:translateX(-50%); max-width:calc(100% - 32px);
+          padding:8px 14px; border-radius:8px; background:rgba(240,180,41,.95); color:#1b1f27; font-size:13px; pointer-events:none; }
+  #toast { position:fixed; left:50%; top:72px; transform:translateX(-50%); max-width:calc(100% - 32px); z-index:30;
+           padding:9px 16px; border-radius:8px; background:rgba(23,26,33,.95); color:#e8eaf0; font-size:13px;
+           border:1px solid #2a2f3a; box-shadow:0 8px 24px rgba(0,0,0,.3); pointer-events:none; transition:opacity .2s; }
+
+  /* ===== 面板 (鍵盤 / 剪貼簿 / 檔案)：桌機在右下，手機從下面滑出來 ===== */
+  .sheet { position:fixed; right:16px; bottom:16px; width:420px; max-width:calc(100% - 32px); max-height:calc(100% - 96px);
+           display:flex; flex-direction:column; background:var(--panel); border:1px solid var(--line); border-radius:12px;
+           box-shadow:0 16px 40px rgba(0,0,0,.35); z-index:20; }
+  @media (max-width:760px) {
+    .sheet { left:0; right:0; bottom:0; width:auto; max-width:none; max-height:70%; border-radius:14px 14px 0 0; }
+  }
+  .sheet header { display:flex; align-items:center; gap:8px; padding:10px 12px 10px 16px; border-bottom:1px solid var(--line); }
+  .sheet header h2 { margin:0; font-size:15px; flex:1; }
+  .sheet .body { padding:12px 16px 16px; overflow:auto; }
+  .sheet .close { background:none; border:0; color:var(--muted); cursor:pointer; padding:4px 8px; font-size:18px; line-height:1; }
+  .sheet textarea { min-height:72px; resize:vertical; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  .row.end { justify-content:flex-end; }
+  .keys { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+  .keys .btn { padding:6px 10px; min-width:44px; font-size:13px; }
+  .section { font-size:12px; color:var(--muted); margin:14px 0 0; }
+  .section:first-child { margin-top:0; }
+  .help { font-size:12px; color:var(--muted); margin:12px 0 0; }
+
+  #files .path { font-size:12px; color:var(--muted); word-break:break-all; margin-bottom:8px; }
+  #fileList { list-style:none; margin:0; padding:0; border:1px solid var(--line); border-radius:8px; max-height:46vh; overflow:auto; }
+  #fileList li { display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid var(--line); cursor:pointer; }
+  #fileList li:last-child { border-bottom:0; }
+  #fileList li:hover { background:rgba(61,139,253,.08); }
+  #fileList .name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #fileList .meta { color:var(--muted); font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  #fileList .icon { flex:none; color:var(--muted); }
+  #fileList .dir .icon { color:var(--accent); }
+  progress { width:100%; height:6px; margin-top:10px; }
+</style>
+</head>
+<body>
+
+<main id="login">
+  <form class="card" id="form" autocomplete="off">
+    <div class="brand">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+      <h1>遠端畫面</h1>
+    </div>
+    <p class="sub">SmartRemote · 看畫面 / 遙控電腦</p>
+    <label for="room">房間碼</label>
+    <input id="room" autocapitalize="characters" spellcheck="false" required>
+    <label for="pass">密碼</label>
+    <div class="field">
+      <input id="pass" type="password" autocapitalize="characters" spellcheck="false" required>
+      <button type="button" class="eye" id="eye">顯示</button>
+    </div>
+    <button class="btn primary" id="go" type="submit">連線</button>
+    <p id="loginMsg" role="status"></p>
+    <p class="hint">在電腦上開啟 SmartRemote，右鍵系統匣圖示就能看到房間碼與密碼；設定檔 control 開了才能遙控。畫面由兩台裝置直接連線傳送，不經過伺服器。網址後面加上「#房間碼/密碼」並加入書籤，下次打開就會自動連線。</p>
+  </form>
+</main>
+
+<div id="viewer" class="hidden">
+  <div class="bar">
+    <div class="state"><span class="dot" id="dot"></span><span id="stateText"></span></div>
+    <span id="stats"></span>
+    <div class="controls">
+      <select id="screens" class="hidden" aria-label="螢幕"></select>
+      <select id="quality" class="hidden" aria-label="畫質" title="畫質 (都是每秒 60 張)：省流量 = 寬 1280、約 2.5 Mbps / 標準 = 寬 1920、約 6 Mbps / 清晰 = 原始解析度、最高 20 Mbps (網路要很快)">
+        <option value="0">省流量</option>
+        <option value="1">標準</option>
+        <option value="2">清晰</option>
+      </select>
+      <select id="fit" aria-label="顯示方式">
+        <option value="width">填滿寬度</option>
+        <option value="fit">整個畫面</option>
+        <option value="real">原始大小</option>
+      </select>
+      <button class="btn hidden" id="ctl" type="button" title="遙控：滑鼠 / 觸控 / 鍵盤直接操作電腦">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4l7 17 2.5-7.5L21 11z"/></svg><span class="label">遙控</span>
+      </button>
+      <button class="btn hidden" id="kbBtn" type="button" title="特殊按鍵 / 輸入文字">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg><span class="label">鍵盤</span>
+      </button>
+      <button class="btn hidden" id="clipBtn" type="button" title="剪貼簿">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg><span class="label">剪貼簿</span>
+      </button>
+      <button class="btn hidden" id="fileBtn" type="button" title="傳檔案">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span class="label">檔案</span>
+      </button>
+      <button class="btn" id="full" type="button">全螢幕</button>
+      <button class="btn danger" id="disconnect" type="button">中斷連線</button>
+    </div>
+  </div>
+  <div id="stage" tabindex="-1">
+    <video id="video" class="media hidden" autoplay muted playsinline></video>
+    <img id="screen" class="media" alt="" draggable="false">
+    <div id="overlay" class="hidden"></div>
+    <div id="note" class="hidden"></div>
+  </div>
+
+  <!-- 鍵盤：輸入文字 (手機輸入法、中文) + 特殊按鍵 -->
+  <section class="sheet hidden" id="kbSheet" aria-label="鍵盤">
+    <header><h2>鍵盤</h2><button class="close" type="button" data-close>×</button></header>
+    <div class="body">
+      <p class="section">輸入文字 (直接打到電腦上目前的輸入位置)</p>
+      <textarea id="textIn" placeholder="在這裡打字，按送出" spellcheck="false"></textarea>
+      <div class="row end">
+        <button class="btn" type="button" id="sendText">送出</button>
+        <button class="btn primary" type="button" id="sendTextEnter">送出並按 Enter</button>
+      </div>
+      <p class="section">修飾鍵 (先點，再點下面的按鍵 = 組合鍵)</p>
+      <div class="keys" id="mods">
+        <button class="btn" type="button" data-mod="ControlLeft">Ctrl</button>
+        <button class="btn" type="button" data-mod="AltLeft">Alt</button>
+        <button class="btn" type="button" data-mod="ShiftLeft">Shift</button>
+        <button class="btn" type="button" data-mod="MetaLeft">Win</button>
+      </div>
+      <p class="section">按鍵</p>
+      <div class="keys" id="keyPad"></div>
+      <p class="section">常用組合</p>
+      <div class="keys" id="combos"></div>
+      <p class="help" id="kbHelp"></p>
+    </div>
+  </section>
+  
+  <!-- 剪貼簿：電腦 ↔ 這台裝置 -->
+  <section class="sheet hidden" id="clipSheet" aria-label="剪貼簿">
+    <header><h2>剪貼簿</h2><button class="close" type="button" data-close>×</button></header>
+    <div class="body">
+      <p class="section">電腦上最近複製的文字</p>
+      <textarea id="pcClip" readonly placeholder="電腦上複製文字後會出現在這裡"></textarea>
+      <div class="row end"><button class="btn" type="button" id="copyPc">複製到這台裝置</button></div>
+      <p class="section">放到電腦的剪貼簿 (之後在電腦上按 Ctrl+V 貼上)</p>
+      <textarea id="toPc" placeholder="貼上或輸入文字"></textarea>
+      <div class="row end">
+        <button class="btn" type="button" id="pasteLocal">貼上這台裝置的剪貼簿</button>
+        <button class="btn primary" type="button" id="sendClip">傳到電腦</button>
+      </div>
+      <p class="help">用電腦 (滑鼠鍵盤) 遙控時，在畫面上按 Ctrl+V 會先把這台的剪貼簿傳過去再貼上；電腦上複製的文字也會自動放進這台的剪貼簿 (瀏覽器允許的話)。</p>
+    </div>
+  </section>
+  
+  <!-- 檔案：瀏覽電腦的資料夾，下載 / 上傳 -->
+  <section class="sheet hidden" id="files" aria-label="檔案">
+    <header><h2>電腦的檔案</h2><button class="close" type="button" data-close>×</button></header>
+    <div class="body">
+      <div class="row" style="margin:0 0 8px">
+        <button class="btn" type="button" id="fileUp">上一層</button>
+        <button class="btn" type="button" id="fileHome">常用位置</button>
+        <span style="flex:1"></span>
+        <button class="btn primary" type="button" id="fileUpload">上傳到這裡</button>
+        <input type="file" id="filePick" multiple class="hidden">
+      </div>
+      <div class="path" id="filePath"></div>
+      <ul id="fileList"></ul>
+      <div id="fileProgress" class="hidden"><div class="help" id="fileProgressText" style="margin-top:10px"></div><progress id="fileBar" max="1" value="0"></progress></div>
+      <p class="help">點資料夾打開，點檔案下載到這台裝置。上傳的檔案放在目前的資料夾，同名不會覆蓋。也可以直接把檔案拖到畫面上 (放到「下載」資料夾)。</p>
+    </div>
+  </section>
+  
+  <div id="toast" class="hidden"></div>
+</div>
+
+
+
+<script>
+const NTFY = "https://ntfy.sh";
+const STUN = ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"];
+const TRIES = 3;          // 連不上自動重試幾次 (手機網路打洞時好時壞，重新來過常常就通)
+const NO_ANSWER_MS = 15000;
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder(), dec = new TextDecoder();
+const store = { get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch { return d; } },
+                set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
+
+// ===== 加密：跟分享端相同，deflate-raw 壓縮 → AES-GCM → base64(iv | 密文 | tag) =====
+async function sha256(s) { return new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(s))); }
+const hex = b => [...b].map(x => x.toString(16).padStart(2, "0")).join("");
+const b64 = b => btoa(String.fromCharCode(...b));
+const unb64 = s => Uint8Array.from(atob(s.trim()), c => c.charCodeAt(0));
+async function pipe(bytes, stream) {
+  return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer());
+}
+async function encrypt(key, obj) {
+  const plain = await pipe(enc.encode(JSON.stringify(obj)), new CompressionStream("deflate-raw"));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plain));
+  const all = new Uint8Array(12 + ct.length); all.set(iv); all.set(ct, 12);
+  return b64(all);
+}
+async function decrypt(key, text) {
+  const all = unb64(text);
+  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: all.slice(0, 12) }, key, all.slice(12));
+  return JSON.parse(dec.decode(await pipe(new Uint8Array(plain), new DecompressionStream("deflate-raw"))));
+}
+
+// ===== 狀態 =====
+let pc = null, es = null, dc = null, filesDc = null, everConnected = false, wakeLock = null;
+let caps = null;          // 分享端的能力 {video, control}；舊版分享端不會送 (= null)
+let frameCount = 0, tickFrames = 0, tickBytes = 0, lastFrameAt = 0, lastVideoStats = null;
+let controlOn = false;
+const video = $("video"), img = $("screen"), stage = $("stage");
+
+function closePeer() {
+  const p = pc, e = es;
+  pc = es = dc = filesDc = null;
+  caps = null;
+  if (p) p.close();
+  if (e) e.close();
+  setControl(false, true);
+  for (const id of ["kbSheet", "clipSheet", "files"]) $(id).classList.add("hidden");
+  for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn", "quality"]) $(id).classList.add("hidden");
+  $("note").classList.add("hidden");
+}
+function loginMsg(text, bad) { $("loginMsg").textContent = text || ""; $("loginMsg").className = bad ? "bad" : ""; }
+function showLogin(text, bad) {
+  closePeer();
+  everConnected = false;
+  releaseWake();
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  $("viewer").classList.add("hidden");
+  $("login").classList.remove("hidden");
+  $("go").disabled = false;
+  $("go").textContent = "連線";
+  loginMsg(text, bad);
+  document.title = "SmartRemote 遠端畫面";
+}
+function showViewer() { $("login").classList.add("hidden"); $("viewer").classList.remove("hidden"); }
+function setState(kind, text) { $("dot").className = "dot " + kind; $("stateText").textContent = text; }
+function overlay(text) { $("overlay").textContent = text || ""; $("overlay").classList.toggle("hidden", !text); }
+// 連線進度：第一次連線顯示在卡片上；看畫面時斷線重連顯示在畫面上
+function progress(text) { if (everConnected) { setState("warn", text); overlay(text); } else loginMsg(text); }
+const fail = text => showLogin(text, true);
+let toastTimer = 0;
+function toast(text, ms = 2500) {
+  const t = $("toast");
+  t.textContent = text; t.classList.remove("hidden");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.add("hidden"), ms);
+}
+
+// 連線中不讓手機自動鎖屏 (鎖屏後瀏覽器會暫停，連線就斷了)
+async function requestWake() {
+  try { if ("wakeLock" in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request("screen"); wakeLock.onrelease = () => { wakeLock = null; }; } } catch {}
+}
+function releaseWake() { try { if (wakeLock) wakeLock.release(); } catch {} wakeLock = null; }
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && pc && pc.connectionState === "connected") requestWake();
+  if (document.visibilityState === "hidden") send({ t: "release" });   // 切走時放開所有按鍵，避免卡鍵
+});
+
+function send(obj) { if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj)); }
+
+// ===== 連線 =====
+async function connect(room, pass, attempt = 1) {
+  closePeer();
+  const tag = attempt > 1 ? `（重試 ${attempt - 1}/${TRIES - 1}）` : "";
+  const topic = "lash-" + hex(await sha256("lash-topic:" + room)).slice(0, 24);
+  const key = await crypto.subtle.importKey("raw", await sha256("lash-key:" + room + ":" + pass), "AES-GCM", false, ["encrypt", "decrypt"]);
+  const id = hex(crypto.getRandomValues(new Uint8Array(6)));
+
+  const me = pc = new RTCPeerConnection({ iceServers: [{ urls: STUN }] });
+  const cands = { host: 0, srflx: 0 };
+  let connected = false;
+  me.onicecandidate = e => { if (e.candidate && e.candidate.type in cands) cands[e.candidate.type]++; };
+  me.onconnectionstatechange = () => {
+    if (pc !== me) return;   // 已經中斷或重連，舊的不管
+    const st = me.connectionState;
+    if (st === "connected") {
+      connected = everConnected = true;
+      showViewer();
+      setState("ok", "已連線");
+      if (!lastFrameAt) overlay("等待畫面…");
+      requestWake();
+    } else if (st === "disconnected") {
+      setState("warn", "訊號不穩，等待恢復…");
+    } else if (st === "failed") {
+      // 連過又斷 (例如手機從 Wi-Fi 換到 4G) 從頭重連；沒連上過就重試到 TRIES 次
+      if (connected) { progress("連線中斷，重新連線…"); run(room, pass, 1); }
+      else if (attempt < TRIES) { progress("連不上，自動重試…"); run(room, pass, attempt + 1); }
+      else fail(cands.srflx ? "連不上：雙方網路不允許直接連線，換個網路再試（例如 Wi-Fi 與行動網路互換）"
+                            : "連不上：這台裝置查不到自己的外網位址，換個網路再試");
+    }
+  };
+
+  // 影像軌 (新版分享端用 H.264 送畫面)：只收不送，只要 H.264 packetization-mode=1 (分享端的打包方式)
+  const tr = me.addTransceiver("video", { direction: "recvonly" });
+  try {
+    const all = RTCRtpReceiver.getCapabilities("video").codecs;
+    const h264 = all.filter(c => c.mimeType === "video/H264" && /packetization-mode=1/.test(c.sdpFmtpLine || ""));
+    h264.sort((a, b) => (/profile-level-id=42e0/.test(b.sdpFmtpLine) ? 1 : 0) - (/profile-level-id=42e0/.test(a.sdpFmtpLine) ? 1 : 0));
+    const extra = all.filter(c => /rtx|red|ulpfec/.test(c.mimeType));
+    if (h264.length && tr.setCodecPreferences) tr.setCodecPreferences([...h264, ...extra]);
+  } catch {}
+  me.ontrack = e => {
+    if (pc !== me) return;
+    video.srcObject = e.streams && e.streams[0] ? e.streams[0] : new MediaStream([e.track]);
+    video.play().catch(() => {});
+  };
+
+  const ch = dc = me.createDataChannel("screen");
+  ch.binaryType = "arraybuffer";
+  let frames = new Map(), shown = -1, url = null;
+  ch.onmessage = e => {
+    if (typeof e.data === "string") { onText(ch, JSON.parse(e.data)); return; }
+    tickBytes += e.data.byteLength;
+    // 一張畫面切成好幾塊：標頭 = 畫面編號 u32、第幾塊 u16、共幾塊 u16 (little endian)
+    const v = new DataView(e.data);
+    const f = v.getUint32(0, true), i = v.getUint16(4, true), n = v.getUint16(6, true);
+    if (f <= shown) return;
+    let parts = frames.get(f);
+    if (!parts) { parts = { n, got: 0, data: new Array(n) }; frames.set(f, parts); }
+    if (!parts.data[i]) { parts.data[i] = new Uint8Array(e.data, 8); parts.got++; }
+    if (parts.got < parts.n) return;
+    for (const k of frames.keys()) if (k <= f) frames.delete(k);
+    shown = f;
+    if (url) URL.revokeObjectURL(url);
+    url = URL.createObjectURL(new Blob(parts.data, { type: "image/jpeg" }));
+    img.src = url;
+    gotFrame(1);
+  };
+
+  progress("查詢網路位址…" + tag);
+  await me.setLocalDescription(await me.createOffer());
+  // 等網路位址收集完再送出。手機網路查外網位址 (srflx) 可能要好幾秒，沒等到就送出一定打不通：
+  // 收集完成就送；查到外網位址後最多再等 1.5 秒 (等另一台 STUN)；最多等 10 秒
+  await new Promise(r => {
+    const t0 = Date.now();
+    let srflxAt = 0;
+    const timer = setInterval(() => {
+      if (cands.srflx && !srflxAt) srflxAt = Date.now();
+      if (pc !== me || me.iceGatheringState === "complete" || (srflxAt && Date.now() - srflxAt > 1500) || Date.now() - t0 > 10000) { clearInterval(timer); r(); }
+    }, 100);
+  });
+  if (pc !== me) return;
+
+  progress("等待分享端回應…" + tag);
+  const myEs = es = new EventSource(`${NTFY}/${topic}/sse`);
+  const opened = new Promise(r => { myEs.onopen = r; });
+  myEs.onmessage = async e => {
+    const m = JSON.parse(e.data);
+    if (m.event !== "message") return;
+    let msg;
+    try { msg = await decrypt(key, m.message); } catch { return; }   // 密碼不同 / 其他人的訊息
+    if (msg.t !== "answer" || msg.id !== id) return;
+    myEs.close();
+    if (pc !== me) return;
+    progress("連線中…" + tag);
+    await me.setRemoteDescription({ type: "answer", sdp: msg.sdp });
+  };
+  await opened;
+  if (pc !== me) return;
+  const body = await encrypt(key, { t: "offer", id, sdp: me.localDescription.sdp, v: 2, ua: navigator.userAgent });
+  await fetch(`${NTFY}/${topic}`, { method: "POST", body });
+  setTimeout(() => {
+    if (pc === me && me.connectionState === "new") fail("分享端沒有回應：程式沒有開，或房間碼 / 密碼不對");
+  }, NO_ANSWER_MS);
+}
+const run = (room, pass, attempt) => connect(room, pass, attempt).catch(e => { if (pc) fail("錯誤：" + e.message); });
+
+function gotFrame(n) {
+  frameCount += n; tickFrames += n; lastFrameAt = Date.now();
+  if (!$("overlay").classList.contains("hidden") && pc && pc.connectionState === "connected") overlay("");
+}
+
+// 分享端傳來的文字訊息
+function onText(ch, m) {
+  switch (m.t) {
+    case "screens": showScreens(ch, m); break;
+    case "caps":
+      caps = m;
+      // 用影像軌的話畫面在 <video>，舊版 / 不能編碼 H.264 的用 <img> (JPEG)
+      video.classList.toggle("hidden", !m.video);
+      img.classList.toggle("hidden", !!m.video);
+      $("quality").classList.remove("hidden");
+      $("quality").value = store.get("lash-quality", "1");
+      if (!$("quality").value) $("quality").value = "1";   // 記住的是已經沒有的選項
+      send({ t: "quality", q: Number($("quality").value) });
+      for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn"]) $(id).classList.toggle("hidden", !m.control);
+      if (m.control && store.get("lash-control", "0") === "1") setControl(true, true);
+      break;
+    case "note":
+      $("note").textContent = m.s || "";
+      $("note").classList.toggle("hidden", !m.s);
+      break;
+    case "clip": gotPcClip(m.s); break;
+    case "bye": showLogin(m.s || "分享端中斷了連線", true); break;
+  }
+}
+
+function start() {
+  const room = $("room").value.trim().toUpperCase(), pass = $("pass").value.trim().toUpperCase();
+  if (!room || !pass) { loginMsg("請輸入房間碼與密碼", true); return; }
+  store.set("lash-room", room);
+  $("go").disabled = true;
+  $("go").textContent = "連線中…";
+  everConnected = false; frameCount = 0; lastFrameAt = 0; lastVideoStats = null;
+  img.removeAttribute("src");
+  video.srcObject = null;
+  video.classList.add("hidden"); img.classList.remove("hidden");
+  run(room, pass, 1);
+}
+
+// 每秒更新：張數 / 流量；太久沒有新畫面要提醒
+setInterval(async () => {
+  if (!pc || pc.connectionState !== "connected") { tickFrames = tickBytes = 0; return; }
+  if (caps && caps.video) {
+    // 影像軌：從 WebRTC 統計算解出幾張、收到多少
+    try {
+      const stats = await pc.getStats();
+      stats.forEach(r => {
+        if (r.type !== "inbound-rtp" || r.kind !== "video") return;
+        if (lastVideoStats) {
+          const df = (r.framesDecoded || 0) - lastVideoStats.framesDecoded;
+          if (df > 0) gotFrame(df);
+          tickBytes += (r.bytesReceived || 0) - lastVideoStats.bytesReceived;
+        }
+        lastVideoStats = { framesDecoded: r.framesDecoded || 0, bytesReceived: r.bytesReceived || 0 };
+      });
+    } catch {}
+  }
+  $("stats").textContent = `${tickFrames} 張/秒 · ${Math.round(tickBytes / 1024)} KB/s`;
+  tickFrames = tickBytes = 0;
+  const idle = lastFrameAt ? Math.floor((Date.now() - lastFrameAt) / 1000) : 0;
+  if (idle >= 5) setState("warn", `已連線，${idle} 秒沒有新畫面`);
+  else if (lastFrameAt) setState("ok", controlOn ? "已連線 · 遙控中" : "已連線");
+}, 1000);
+
+// 分享端傳來螢幕清單 → 下拉選單；選了就請分享端換螢幕 (記住上次選的)
+function showScreens(ch, m) {
+  const sel = $("screens");
+  sel.innerHTML = "";
+  for (const s of m.list) sel.add(new Option(`螢幕 ${s.i + 1}${s.primary ? "（主）" : ""}`, s.i));
+  const want = store.get("lash-screen", null);
+  const pick = m.list.find(s => String(s.i) === want) || m.list.find(s => s.primary) || m.list[0];
+  sel.value = pick.i;
+  sel.classList.toggle("hidden", m.list.length < 2);
+  const choose = () => {
+    store.set("lash-screen", sel.value);
+    if (ch.readyState === "open") ch.send(JSON.stringify({ t: "screen", i: Number(sel.value) }));
+  };
+  sel.onchange = choose;
+  choose();
+}
+
+// ===== 遙控 =====
+const isTouch = matchMedia("(pointer: coarse)").matches;
+function setControl(on, quiet) {
+  controlOn = !!on && !!(caps && caps.control);
+  stage.classList.toggle("control", controlOn);
+  $("ctl").classList.toggle("on", controlOn);
+  if (!quiet) store.set("lash-control", controlOn ? "1" : "0");
+  if (controlOn) {
+    stage.focus({ preventScroll: true });
+    if (!quiet) toast(isTouch ? "遙控中：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動"
+                              : "遙控中：滑鼠鍵盤直接操作電腦。全螢幕時 Win、Alt+Tab 也會送過去；Ctrl + Alt + Shift 一起按 = 結束遙控", 5000);
+    lockKeys();
+  } else {
+    if (dc && dc.readyState === "open") dc.send(JSON.stringify({ t: "release" }));
+    try { navigator.keyboard && navigator.keyboard.unlock(); } catch {}
+  }
+}
+$("ctl").onclick = () => setControl(!controlOn);
+
+// 畫面上的位置 → 電腦螢幕上的比例 (0~1)；扣掉 object-fit 留的黑邊
+function media() { return caps && caps.video ? video : img; }
+function toRemote(e) {
+  const el = media(), r = el.getBoundingClientRect();
+  const nw = el.videoWidth || el.naturalWidth, nh = el.videoHeight || el.naturalHeight;
+  if (!nw || !nh || !r.width || !r.height) return null;
+  const scale = Math.min(r.width / nw, r.height / nh);
+  const w = nw * scale, h = nh * scale, ox = (r.width - w) / 2, oy = (r.height - h) / 2;
+  const x = (e.clientX - r.left - ox) / w, y = (e.clientY - r.top - oy) / h;
+  return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)), inside: x >= 0 && x <= 1 && y >= 0 && y <= 1 };
+}
+
+// 滑鼠移動很頻繁：每個畫面更新 (rAF) 最多送一次最新的位置
+let pendingMove = null;
+function queueMove(p) {
+  if (!pendingMove) requestAnimationFrame(() => { if (pendingMove) send({ t: "mm", x: pendingMove.x, y: pendingMove.y }); pendingMove = null; });
+  pendingMove = p;
+}
+function flushMove() { if (pendingMove) { send({ t: "mm", x: pendingMove.x, y: pendingMove.y }); pendingMove = null; } }
+const click = (p, b = 0) => { send({ t: "md", b, x: p.x, y: p.y }); send({ t: "mu", b, x: p.x, y: p.y }); };
+
+// --- 滑鼠 (桌機) ---
+stage.addEventListener("pointerdown", e => {
+  if (!controlOn) return;
+  if (e.pointerType === "touch") return touchDown(e);
+  const p = toRemote(e);
+  if (!p || !p.inside) return;
+  e.preventDefault();
+  stage.focus({ preventScroll: true });
+  stage.setPointerCapture(e.pointerId);
+  flushMove();
+  send({ t: "md", b: e.button, x: p.x, y: p.y });
+});
+stage.addEventListener("pointermove", e => {
+  if (!controlOn) return;
+  if (e.pointerType === "touch") return touchMove(e);
+  const p = toRemote(e);
+  if (p && (p.inside || stage.hasPointerCapture(e.pointerId))) queueMove(p);
+});
+stage.addEventListener("pointerup", e => {
+  if (!controlOn) return;
+  if (e.pointerType === "touch") return touchUp(e);
+  const p = toRemote(e);
+  if (!p) return;
+  flushMove();
+  send({ t: "mu", b: e.button, x: p.x, y: p.y });
+});
+stage.addEventListener("pointercancel", e => { if (controlOn && e.pointerType === "touch") touchCancel(e); });
+stage.addEventListener("contextmenu", e => { if (controlOn) e.preventDefault(); });
+stage.addEventListener("mousedown", e => { if (controlOn && e.button === 1) e.preventDefault(); });   // 中鍵不要變成瀏覽器的自動捲動
+let wheelAcc = { x: 0, y: 0 };
+stage.addEventListener("wheel", e => {
+  if (!controlOn) return;
+  e.preventDefault();
+  const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1.2;   // 換成 Windows 的滾輪單位 (一格 120)
+  wheelAcc.y -= e.deltaY * unit; wheelAcc.x += e.deltaX * unit;
+  const dy = Math.trunc(wheelAcc.y), dx = Math.trunc(wheelAcc.x);
+  if (dy || dx) { send({ t: "wh", dx, dy }); wheelAcc.x -= dx; wheelAcc.y -= dy; }
+}, { passive: false });
+
+// --- 觸控 (手機)：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、一指滑動 = 移動游標、兩指滑動 = 捲動 ---
+const touches = new Map();
+let gesture = null;   // { kind: "tap" | "move" | "drag" | "two" | "scroll", start, p, timer, t0, mid }
+let lastTap = null;   // 連點兩下用同一個位置，電腦才認得是雙擊
+function midpoint() {
+  const pts = [...touches.values()];
+  return { x: pts.reduce((s, p) => s + p.clientX, 0) / pts.length, y: pts.reduce((s, p) => s + p.clientY, 0) / pts.length };
+}
+function touchDown(e) {
+  e.preventDefault();
+  touches.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+  if (touches.size === 1) {
+    const p = toRemote(e);
+    if (!p) return;
+    gesture = { kind: "tap", start: { x: e.clientX, y: e.clientY }, p, t0: Date.now() };
+    gesture.timer = setTimeout(() => {
+      if (!gesture || gesture.kind !== "tap") return;
+      gesture.kind = "drag";
+      send({ t: "md", b: 0, x: gesture.p.x, y: gesture.p.y });
+      if (navigator.vibrate) navigator.vibrate(30);
+    }, 500);
+  } else if (touches.size === 2 && gesture && (gesture.kind === "tap" || gesture.kind === "move")) {
+    clearTimeout(gesture.timer);
+    gesture = { kind: "two", p: gesture.p, t0: Date.now(), mid: midpoint(), acc: 0 };
+  }
+}
+function touchMove(e) {
+  if (!touches.has(e.pointerId)) return;
+  e.preventDefault();
+  touches.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+  if (!gesture) return;
+  if (gesture.kind === "two" || gesture.kind === "scroll") {
+    if (touches.size < 2) return;
+    const m = midpoint(), d = m.y - gesture.mid.y;
+    if (gesture.kind === "two" && Math.abs(d) < 8) return;
+    gesture.kind = "scroll";
+    gesture.acc += d * 4; gesture.mid = m;
+    const dy = Math.trunc(gesture.acc);
+    if (dy) { send({ t: "wh", dx: 0, dy }); gesture.acc -= dy; }
+    return;
+  }
+  const p = toRemote(e);
+  if (!p) return;
+  if (gesture.kind === "tap" && Math.hypot(e.clientX - gesture.start.x, e.clientY - gesture.start.y) > 10) {
+    clearTimeout(gesture.timer);
+    gesture.kind = "move";
+  }
+  if (gesture.kind === "move" || gesture.kind === "drag") { gesture.p = p; queueMove(p); }
+}
+function touchUp(e) {
+  if (!touches.delete(e.pointerId) || !gesture) return;
+  e.preventDefault();
+  const g = gesture;
+  if (g.kind === "two") {
+    // 兩指一起點一下 (沒有滑動) = 右鍵
+    if (touches.size === 0 && Date.now() - g.t0 < 400) click(g.p, 2);
+    if (touches.size === 0) gesture = null;
+    return;
+  }
+  if (touches.size > 0) return;
+  clearTimeout(g.timer);
+  gesture = null;
+  flushMove();
+  if (g.kind === "drag") send({ t: "mu", b: 0, x: g.p.x, y: g.p.y });
+  else if (g.kind === "tap") {
+    let p = g.p;
+    if (lastTap && Date.now() - lastTap.at < 450 && Math.hypot(g.start.x - lastTap.x, g.start.y - lastTap.y) < 24) p = lastTap.p;
+    click(p);
+    lastTap = { at: Date.now(), x: g.start.x, y: g.start.y, p };
+  }
+}
+function touchCancel(e) {
+  touches.delete(e.pointerId);
+  if (gesture && gesture.kind === "drag") send({ t: "mu", b: 0, x: gesture.p.x, y: gesture.p.y });
+  if (gesture) clearTimeout(gesture.timer);
+  if (touches.size === 0) gesture = null;
+}
+
+// --- 鍵盤 (桌機)：遙控中，畫面上的按鍵都送到電腦 (用實體鍵位 e.code，電腦那邊的輸入法照常運作) ---
+let keyChain = Promise.resolve();   // 依序送出 (Ctrl+V 要先等剪貼簿傳過去)
+const typing = e => e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT");
+function onKey(e, down) {
+  if (!controlOn || typing(e) || !e.code) return;
+  // Ctrl + Alt + Shift 一起按 = 結束遙控 (滑鼠被畫面拉住、按不到按鈕時用；已經送出去的 Ctrl / Alt 由 release 放開)
+  if (down && e.ctrlKey && e.altKey && e.shiftKey) { e.preventDefault(); setControl(false); toast("已結束遙控"); return; }
+  if (!$("viewer").contains(document.activeElement) && document.activeElement !== document.body) return;
+  e.preventDefault();
+  const code = e.code;
+  if (down && code === "KeyV" && (e.ctrlKey || e.metaKey) && navigator.clipboard && navigator.clipboard.readText) {
+    // Ctrl+V：先把這台的剪貼簿放到電腦上
+    keyChain = keyChain.then(() => navigator.clipboard.readText().then(t => { if (t) send({ t: "clip", s: t.slice(0, 60000) }); }).catch(() => {}));
+  }
+  keyChain = keyChain.then(() => send({ t: down ? "kd" : "ku", c: code }));
+}
+document.addEventListener("keydown", e => onKey(e, true));
+document.addEventListener("keyup", e => onKey(e, false));
+window.addEventListener("blur", () => send({ t: "release" }));
+// 全螢幕時鎖定鍵盤 (Chrome / Edge)：Win、Alt+Tab、Esc 也會送到電腦 (按住 Esc 離開全螢幕)
+function lockKeys() { try { if (controlOn && document.fullscreenElement && navigator.keyboard) navigator.keyboard.lock(); } catch {} }
+
+// --- 鍵盤面板 ---
+const KEYS = [["Esc", "Escape"], ["Tab", "Tab"], ["Enter", "Enter"], ["⌫", "Backspace"], ["Del", "Delete"], ["空白", "Space"],
+  ["↑", "ArrowUp"], ["↓", "ArrowDown"], ["←", "ArrowLeft"], ["→", "ArrowRight"], ["Home", "Home"], ["End", "End"],
+  ["PgUp", "PageUp"], ["PgDn", "PageDown"], ["Win", "MetaLeft"], ["PrtSc", "PrintScreen"],
+  ...Array.from({ length: 12 }, (_, i) => ["F" + (i + 1), "F" + (i + 1)])];
+const COMBOS = [["複製 Ctrl+C", ["ControlLeft", "KeyC"]], ["貼上 Ctrl+V", ["ControlLeft", "KeyV"]], ["剪下 Ctrl+X", ["ControlLeft", "KeyX"]],
+  ["全選 Ctrl+A", ["ControlLeft", "KeyA"]], ["復原 Ctrl+Z", ["ControlLeft", "KeyZ"]], ["切換視窗 Alt+Tab", ["AltLeft", "Tab"]],
+  ["關閉 Alt+F4", ["AltLeft", "F4"]], ["桌面 Win+D", ["MetaLeft", "KeyD"]], ["工作管理員", ["ControlLeft", "ShiftLeft", "Escape"]]];
+const mods = new Set();
+function pressKeys(codes) {
+  if (!dc || dc.readyState !== "open") return;
+  dc.send(JSON.stringify({ t: "keys", c: [...mods, ...codes] }));
+  mods.clear();
+  for (const b of $("mods").children) b.classList.remove("on");
+}
+for (const [label, code] of KEYS) {
+  const b = document.createElement("button");
+  b.className = "btn"; b.type = "button"; b.textContent = label;
+  b.onclick = () => pressKeys([code]);
+  $("keyPad").append(b);
+}
+for (const [label, codes] of COMBOS) {
+  const b = document.createElement("button");
+  b.className = "btn"; b.type = "button"; b.textContent = label;
+  b.onclick = () => { mods.clear(); pressKeys(codes); };
+  $("combos").append(b);
+}
+for (const b of $("mods").children) b.onclick = () => { const m = b.dataset.mod; mods.has(m) ? mods.delete(m) : mods.add(m); b.classList.toggle("on", mods.has(m)); };
+function sendText(enter) {
+  const t = $("textIn").value;
+  if (!t || !dc || dc.readyState !== "open") return;
+  dc.send(JSON.stringify({ t: "text", s: t.slice(0, 60000) }));
+  if (enter) dc.send(JSON.stringify({ t: "keys", c: ["Enter"] }));
+  $("textIn").value = "";
+}
+$("sendText").onclick = () => sendText(false);
+$("sendTextEnter").onclick = () => sendText(true);
+$("kbHelp").textContent = "Ctrl+Alt+Del、鎖定畫面、UAC 確認視窗是 Windows 的安全畫面，遠端沒辦法操作。";
+
+// --- 剪貼簿 ---
+function gotPcClip(text) {
+  $("pcClip").value = text;
+  // 桌機瀏覽器在頁面有焦點時可以直接寫進剪貼簿；手機通常不行 (要使用者按按鈕)
+  if (document.hasFocus() && navigator.clipboard && navigator.clipboard.writeText)
+    navigator.clipboard.writeText(text).then(() => toast("已複製電腦剪貼簿的文字")).catch(() => toast("電腦剪貼簿有新的文字 (按「剪貼簿」查看)"));
+  else toast("電腦剪貼簿有新的文字 (按「剪貼簿」查看)");
+}
+$("copyPc").onclick = async () => {
+  const t = $("pcClip").value;
+  try { await navigator.clipboard.writeText(t); toast("已複製"); }
+  catch { $("pcClip").select(); document.execCommand("copy"); toast("已複製"); }
+};
+$("pasteLocal").onclick = async () => {
+  try { $("toPc").value = await navigator.clipboard.readText(); }
+  catch { toast("瀏覽器不允許讀取剪貼簿，請直接貼到框裡"); }
+};
+$("sendClip").onclick = () => {
+  const t = $("toPc").value;
+  if (!t || !dc || dc.readyState !== "open") return;
+  if (t.length > 60000) { toast("文字太長 (最多 60000 字)"); return; }
+  dc.send(JSON.stringify({ t: "clip", s: t }));
+  toast("已放到電腦的剪貼簿");
+};
+
+// --- 檔案 (另一條 DataChannel "files"，第一次打開面板時才建立) ---
+let fileDir = "", fileUpDir = null, rootItems = null, fileJob = null, fileQueue = [];
+function filesChannel() {
+  if (filesDc && filesDc.readyState !== "closed") return filesDc;
+  const ch = filesDc = pc.createDataChannel("files");
+  ch.binaryType = "arraybuffer";
+  ch.bufferedAmountLowThreshold = 1 << 20;
+  ch.onmessage = e => {
+    if (typeof e.data !== "string") {
+      if (fileJob && fileJob.kind === "get") { fileJob.parts.push(e.data); fileJob.got += e.data.byteLength; showProgress(fileJob); }
+      return;
+    }
+    const m = JSON.parse(e.data);
+    switch (m.t) {
+      case "dir": showDir(m); break;
+      case "fbegin": if (fileJob) { fileJob.name = m.n; fileJob.size = m.s; showProgress(fileJob); } break;
+      case "fend": {
+        const job = fileJob; fileJob = null; hideProgress();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob(job.parts));
+        a.download = job.name; document.body.append(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+        toast("已下載 " + job.name);
+        nextFile();
+        break;
+      }
+      case "saved": fileJob = null; hideProgress(); toast("已上傳到 " + m.p, 4000); listDir(fileDir); nextFile(); break;
+      case "ferr": fileJob = null; hideProgress(); toast("失敗：" + m.s, 4000); nextFile(); break;
+    }
+  };
+  return ch;
+}
+function fileSend(obj) {
+  const ch = filesChannel();
+  if (ch.readyState === "open") ch.send(JSON.stringify(obj));
+  else ch.addEventListener("open", () => ch.send(JSON.stringify(obj)), { once: true });
+}
+const listDir = p => fileSend({ t: "ls", p: p || null });
+const sizeText = s => s >= 1 << 30 ? (s / (1 << 30)).toFixed(1) + " GB" : s >= 1 << 20 ? (s / (1 << 20)).toFixed(1) + " MB" : Math.max(1, Math.round(s / 1024)) + " KB";
+const ICON_DIR = '<svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+const ICON_FILE = '<svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/></svg>';
+function showDir(m) {
+  fileDir = m.p; fileUpDir = m.p ? (m.up || "") : null;
+  if (!m.p) rootItems = m.items;
+  $("filePath").textContent = m.p || "常用位置與磁碟";
+  $("fileUp").disabled = fileUpDir === null;
+  $("fileUpload").disabled = !m.p;
+  const list = $("fileList");
+  list.innerHTML = "";
+  if (!m.items.length) { const li = document.createElement("li"); li.textContent = "(空的)"; li.style.cursor = "default"; list.append(li); }
+  for (const it of m.items) {
+    const li = document.createElement("li");
+    li.className = it.d ? "dir" : "file";
+    li.innerHTML = (it.d ? ICON_DIR : ICON_FILE) + '<span class="name"></span><span class="meta"></span>';
+    li.querySelector(".name").textContent = it.n;
+    li.querySelector(".meta").textContent = it.d ? (it.m || "") : `${sizeText(it.s)}${it.m ? " · " + it.m : ""}`;
+    li.onclick = () => it.d ? listDir(it.p) : queueFile({ kind: "get", path: it.p, name: it.n, size: it.s });
+    list.append(li);
+  }
+}
+function showProgress(job) {
+  $("fileProgress").classList.remove("hidden");
+  $("fileProgressText").textContent = `${job.kind === "get" ? "下載" : "上傳"} ${job.name}：${sizeText(job.got)} / ${sizeText(job.size || 0)}`;
+  $("fileBar").value = job.size ? job.got / job.size : 0;
+}
+function hideProgress() { $("fileProgress").classList.add("hidden"); }
+function queueFile(job) { fileQueue.push(job); if (!fileJob) nextFile(); }
+async function nextFile() {
+  const job = fileQueue.shift();
+  if (!job) return;
+  fileJob = Object.assign(job, { got: 0, parts: [] });
+  if (job.kind === "get") { showProgress(job); fileSend({ t: "get", p: job.path }); return; }
+  // 上傳：16 KB 一塊，送出還沒傳完的超過 4 MB 就等一下
+  const ch = filesChannel();
+  if (ch.readyState !== "open") await new Promise(r => ch.addEventListener("open", r, { once: true }));
+  ch.send(JSON.stringify({ t: "put", p: job.dir, n: job.file.name, s: job.file.size }));
+  for (let off = 0; off < job.file.size; off += 16384) {
+    if (fileJob !== job || ch.readyState !== "open") return;
+    if (ch.bufferedAmount > 4 << 20) await new Promise(r => ch.addEventListener("bufferedamountlow", r, { once: true }));
+    const chunk = await job.file.slice(off, off + 16384).arrayBuffer();
+    ch.send(chunk);
+    job.got = Math.min(job.file.size, off + chunk.byteLength);
+    showProgress(job);
+  }
+  if (fileJob === job) ch.send(JSON.stringify({ t: "pend" }));
+}
+function uploadFiles(files, dir) { for (const f of files) queueFile({ kind: "put", file: f, dir, name: f.name, size: f.size }); }
+$("fileUp").onclick = () => { if (fileUpDir !== null) listDir(fileUpDir); };
+$("fileHome").onclick = () => listDir(null);
+$("fileUpload").onclick = () => $("filePick").click();
+$("filePick").onchange = () => { uploadFiles([...$("filePick").files], fileDir); $("filePick").value = ""; };
+// 拖檔案到畫面上 = 上傳到電腦的「下載」資料夾
+stage.addEventListener("dragover", e => { if (caps && caps.control) e.preventDefault(); });
+stage.addEventListener("drop", e => {
+  if (!caps || !caps.control || !e.dataTransfer.files.length) return;
+  e.preventDefault();
+  const files = [...e.dataTransfer.files];
+  const go = () => {
+    const dl = (rootItems || []).find(it => it.n === "下載") || (rootItems || []).find(it => it.n === "桌面");
+    if (!dl) { toast("找不到電腦的下載資料夾，請從「檔案」上傳"); return; }
+    uploadFiles(files, dl.p);
+    toast(`上傳 ${files.length} 個檔案到 ${dl.p}`);
+  };
+  if (rootItems) go();
+  else { listDir(null); const t = setInterval(() => { if (rootItems) { clearInterval(t); go(); } }, 100); setTimeout(() => clearInterval(t), 5000); }
+});
+
+// ===== 面板 / 按鈕 =====
+function openSheet(id) {
+  for (const s of ["kbSheet", "clipSheet", "files"]) if (s !== id) $(s).classList.add("hidden");
+  $(id).classList.toggle("hidden");
+}
+for (const b of document.querySelectorAll("[data-close]")) b.onclick = () => b.closest(".sheet").classList.add("hidden");
+$("kbBtn").onclick = () => openSheet("kbSheet");
+$("clipBtn").onclick = () => openSheet("clipSheet");
+$("fileBtn").onclick = () => { openSheet("files"); if (!$("files").classList.contains("hidden") && !rootItems) listDir(null); };
+
+$("form").onsubmit = e => { e.preventDefault(); start(); };
+$("eye").onclick = () => {
+  const p = $("pass");
+  p.type = p.type === "password" ? "text" : "password";
+  $("eye").textContent = p.type === "password" ? "顯示" : "隱藏";
+};
+$("disconnect").onclick = () => showLogin("已中斷連線");
+if (document.fullscreenEnabled) {
+  $("full").onclick = () => document.fullscreenElement ? document.exitFullscreen().catch(() => {}) : $("viewer").requestFullscreen().catch(() => {});
+  document.addEventListener("fullscreenchange", () => {
+    $("full").textContent = document.fullscreenElement ? "結束全螢幕" : "全螢幕";
+    if (document.fullscreenElement) lockKeys();
+  });
+} else $("full").classList.add("hidden");   // iPhone 的 Safari 不支援
+
+const fit = $("fit");
+fit.value = store.get("lash-fit", "width");
+const applyFit = () => { for (const el of [video, img]) { el.classList.remove("width", "fit", "real"); el.classList.add(fit.value); } store.set("lash-fit", fit.value); };
+fit.onchange = applyFit;
+applyFit();
+$("quality").onchange = () => { store.set("lash-quality", $("quality").value); send({ t: "quality", q: Number($("quality").value) }); };
+
+$("room").value = store.get("lash-room", "");
+// 網址可帶 #房間碼/密碼 直接連線 (方便加入書籤)
+const h = decodeURIComponent(location.hash.slice(1)).split("/");
+if (h.length === 2 && h[0] && h[1]) { $("room").value = h[0]; $("pass").value = h[1]; start(); }
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+bin/
+obj/
+.vs/
+logs/
+settings.json
+remote_test.h264
+*.user
