@@ -18,7 +18,7 @@ namespace SmartRemote.Core
 
         const string Example = """
             {
-              // 房間碼 / 密碼：不填 = 每次啟動隨機產生；填了就固定 (英文字母或數字，房間碼至少 4 個字、密碼至少 8 個字)
+              // 房間碼 / 密碼：不填 = 每次啟動隨機產生；填了就固定 (房間碼：英文字母或數字，至少 4 個字；密碼：至少 8 個字，可用英文、數字與符號，不能有空白和 /)
               "room": "",
               "password": "",
               // false = 只能看；true = 可以遙控這台電腦 (知道房間碼和密碼的人就能操作，密碼請設長一點)
@@ -37,17 +37,27 @@ namespace SmartRemote.Core
             }
             catch (JsonException ex) { throw new FormatException($"settings.json 格式錯誤：{ex.Message}"); }
             s.Room = Code(s.Room, "room", 4);
-            s.Password = Code(s.Password, "password", 8);
+            s.Password = ValidPassword(s.Password);
             return s;
         }
 
-        // 轉大寫；只能英數 - _ (觀看頁網址 #房間碼/密碼 用到)
+        // 房間碼：轉大寫；只能英數 - _ (觀看頁網址 #房間碼/密碼 用到)
         static string Code(string value, string name, int min)
         {
             if (string.IsNullOrWhiteSpace(value)) return "";
             value = value.Trim().ToUpperInvariant();
             if (value.Length < min || !value.All(ch => ch is (>= 'A' and <= 'Z') or (>= '0' and <= '9') or '-' or '_'))
                 throw new FormatException($"settings.json：{name} 要是至少 {min} 個字的英文字母或數字 (不填 = 每次啟動隨機產生)");
+            return value;
+        }
+
+        // 密碼：至少 8 個字，可以用英文字母、數字與符號 (不能有空白，也不能有 /，觀看網址用 / 分隔房間碼與密碼)；轉大寫 (觀看頁也會轉大寫)
+        static string ValidPassword(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return "";
+            value = value.Trim().ToUpperInvariant();
+            if (value.Length < 8 || !value.All(ch => ch is > ' ' and < '' and not '/'))
+                throw new FormatException("settings.json：password 要是至少 8 個字，可以用英文字母、數字與符號 (不能有空白和 /；不填 = 每次啟動隨機產生)");
             return value;
         }
     }

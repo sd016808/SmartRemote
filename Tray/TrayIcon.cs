@@ -136,7 +136,7 @@ namespace SmartRemote.Tray
             switch (cmd)
             {
                 case CmdCopyCode: SetClipboardText($"房間碼：{room}\n密碼：{password}"); break;
-                case CmdCopyUrl: SetClipboardText($"{RemoteView.ViewerUrl}#{room}/{password}"); break;
+                case CmdCopyUrl: SetClipboardText($"{RemoteView.ViewerUrl}#{room}/{Uri.EscapeDataString(password)}"); break;
                 case CmdControl: RemoteView.SetControl(!RemoteView.AllowControl); break;
                 case CmdPause: RemoteView.TogglePause(); break;
                 case CmdRecord: OpenPath(RemoteLog.FilePath); break;
