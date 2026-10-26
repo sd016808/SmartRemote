@@ -7,7 +7,10 @@
     <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Product>SmartRemote</Product>
-    <Version>1.0.0</Version>
+    <Version>1.0.2</Version>
+    <!-- 組件版本跟著 Version 走 (程式用它判斷有沒有新版) -->
+    <AssemblyVersion>$(Version)</AssemblyVersion>
+    <FileVersion>$(Version)</FileVersion>
     <Authors>吃泡麵度年的SD</Authors>
     <Copyright>吃泡麵度年的SD</Copyright>
     <!-- Native AOT：編成原生 exe (不需裝 .NET、無法用 ILSpy 反編譯)。JSON 一律走 source generator，關掉反射序列化 -->

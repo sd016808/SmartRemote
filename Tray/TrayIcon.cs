@@ -26,7 +26,7 @@ namespace SmartRemote.Tray
         const uint NIF_MESSAGE = 0x1, NIF_ICON = 0x2, NIF_TIP = 0x4;
         const uint GMEM_MOVEABLE = 0x0002, CF_UNICODETEXT = 13;
 
-        const int CmdNone = 0, CmdCopyCode = 1, CmdCopyUrl = 2, CmdControl = 3, CmdPause = 4, CmdRecord = 5, CmdSettings = 6, CmdLogs = 7, CmdExit = 8;
+        const int CmdNone = 0, CmdCopyCode = 1, CmdCopyUrl = 2, CmdControl = 3, CmdPause = 4, CmdRecord = 5, CmdSettings = 6, CmdLogs = 7, CmdExit = 8, CmdUpdate = 9;
 
         static readonly ConcurrentQueue<Action> queue = new();
         static TrayIcon current; // 視窗程序是靜態函式，要用這個找到實例
@@ -64,6 +64,9 @@ namespace SmartRemote.Tray
             RemoteView.Start(room, password, settings.Control, Environment.GetEnvironmentVariable("SMARTREMOTE_DRYRUN") == "1");
             Logger.Info($"SmartRemote 啟動：房間碼 {room}，{(settings.Control ? "可遙控" : "只能看")}");
         }
+
+        /// <summary>從外部結束 (定時更新換好檔案後用)：移除圖示並結束訊息迴圈</summary>
+        public void RequestExit() => Post(Exit);
 
         /// <summary>訊息迴圈，直到選「結束」為止</summary>
         public void Run()
@@ -116,6 +119,7 @@ namespace SmartRemote.Tray
             Add(menu, MF_SEPARATOR, 0, null);
             Add(menu, MF_STRING | (RemoteView.AllowControl ? MF_CHECKED : 0), CmdControl, "允許遙控");
             Add(menu, MF_STRING | (RemoteView.Paused ? MF_CHECKED : 0), CmdPause, "中斷所有連線並暫停接受");
+            Add(menu, MF_STRING, CmdUpdate, "檢查更新");
             Add(menu, MF_SEPARATOR, 0, null);
             Add(menu, MF_STRING, CmdRecord, "開啟連線紀錄");
             Add(menu, MF_STRING, CmdSettings, "開啟設定檔");
@@ -142,8 +146,52 @@ namespace SmartRemote.Tray
                 case CmdRecord: OpenPath(RemoteLog.FilePath); break;
                 case CmdSettings: OpenPath(Settings.FilePath); break;
                 case CmdLogs: OpenPath(AppPaths.InBaseDir("logs")); break;
+                case CmdUpdate: CheckForUpdate(); break;
                 case CmdExit: Exit(); break;
             }
+        }
+
+        // 手動檢查更新：在背景查，結果用圖示的提示文字顯示 (不跳通知)；有新版就換檔、重新啟動
+        void CheckForUpdate()
+        {
+            if (RemoteView.Connections > 0)
+            {
+                ShowTip("有人連線中，不能更新，請稍後再檢查");
+                return;
+            }
+            ShowTip("檢查更新中…");
+            new Thread(() =>
+            {
+                AutoUpdater.Pending update = AutoUpdater.Check();
+                if (update == null)
+                {
+                    Post(() => ShowTip($"已是最新版 v{AutoUpdater.CurrentVersion}"));
+                    return;
+                }
+                if (RemoteView.Connections > 0)
+                {
+                    Post(() => ShowTip("有人連線中，不能更新，請稍後再檢查"));
+                    return;
+                }
+                if (!AutoUpdater.Install(update))
+                {
+                    Post(() => ShowTip("更新失敗，請看日誌資料夾"));
+                    return;
+                }
+                Post(() =>
+                {
+                    AutoUpdater.Relaunch();
+                    Exit();
+                });
+            }) { IsBackground = true, Name = "ManualUpdate" }.Start();
+        }
+
+        // 圖示的提示文字顯示指定的字 (例如檢查更新的結果)；下一次狀態改變時會回到連線狀態
+        void ShowTip(string note)
+        {
+            var nid = Notify(NIF_TIP);
+            SetTip(ref nid, note.Length > 127 ? note[..127] : note);
+            Shell_NotifyIconW(NIM_MODIFY, &nid);
         }
 
         // 狀態改變時更新滑鼠停在圖示上面看到的文字
