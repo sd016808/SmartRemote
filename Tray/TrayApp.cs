@@ -56,39 +56,22 @@ namespace SmartRemote.Tray
             if (!Win32.RegisterHotKey(window.Handle, HotkeyId, MOD_CONTROL, VK_F7))
                 Logger.Warn($"Ctrl+F7 快捷鍵註冊失敗 (Windows 錯誤碼 {Marshal.GetLastWin32Error()}，1409 = 已被其他程式佔用)");
 
-            RemoteLog.Entry += OnLogEntry;
             RemoteView.StateChanged += () => window.Post(Refresh);
             Refresh();
 
             // SMARTREMOTE_DRYRUN=1 只給測試用：遙控的輸入與剪貼簿只寫日誌，不真的動滑鼠鍵盤
             RemoteView.Start(room, password, settings.Control, Environment.GetEnvironmentVariable("SMARTREMOTE_DRYRUN") == "1");
             Logger.Info($"SmartRemote 啟動：房間碼 {room}，{(settings.Control ? "可遙控" : "只能看")}");
-            if (settings.Room == "" || settings.Password == "")
-                tray.ShowBalloonTip(5000, "SmartRemote 已開始等待連線", $"房間碼 {room}　密碼 {password}\n右鍵圖示可以複製網址", ToolTipIcon.Info);
-            else
-                tray.ShowBalloonTip(3000, "SmartRemote 已開始等待連線", "右鍵圖示可以看房間碼、複製網址", ToolTipIcon.Info);
-        }
-
-        // 連線成功 / 中斷連線 才跳通知 (其他紀錄只寫檔)
-        void OnLogEntry(string line)
-        {
-            bool connected = line.Contains("連線成功");
-            bool closed = line.Contains("中斷連線") || line.Contains("沒有連上");
-            if (!connected && !closed) return;
-            string text = line[line.IndexOf("觀看端", StringComparison.Ordinal)..];
-            window.Post(() => tray.ShowBalloonTip(3000, connected ? "有人連線" : "連線中斷", text, ToolTipIcon.Info));
         }
 
         void ToggleControl()
         {
             RemoteView.SetControl(!RemoteView.AllowControl);
-            tray.ShowBalloonTip(2500, "遙控", RemoteView.AllowControl ? "已開啟，之後的連線可以遙控這台電腦" : "已關閉，已連線的人也只能看", ToolTipIcon.Info);
         }
 
         void TogglePause()
         {
-            bool paused = RemoteView.TogglePause();
-            tray.ShowBalloonTip(2500, "SmartRemote", paused ? "已中斷所有連線，暫停接受新連線 (Ctrl+F7 恢復)" : "恢復接受連線", ToolTipIcon.Info);
+            RemoteView.TogglePause();
         }
 
         void Refresh()
@@ -102,13 +85,11 @@ namespace SmartRemote.Tray
         void CopyCode()
         {
             Clipboard.SetText($"房間碼：{room}\n密碼：{password}");
-            tray.ShowBalloonTip(2000, "SmartRemote", "已複製房間碼與密碼", ToolTipIcon.Info);
         }
 
         void CopyUrl()
         {
             Clipboard.SetText($"{RemoteView.ViewerUrl}#{room}/{password}");
-            tray.ShowBalloonTip(2000, "SmartRemote", "已複製觀看網址", ToolTipIcon.Info);
         }
 
         static void OpenPath(string path)
