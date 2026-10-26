@@ -120,7 +120,12 @@ namespace SmartRemote.Core
         {
             var info = new ProcessStartInfo(Environment.ProcessPath) { UseShellExecute = false };
             info.ArgumentList.Add(AfterUpdateArg);
-            Process.Start(info);
+            try { Process.Start(info); }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                // 新版要系統管理員權限、目前這個沒有 (從沒有要求權限的舊版更新上來)：改用系統提升，會跳一次 UAC
+                Process.Start(new ProcessStartInfo(Environment.ProcessPath, AfterUpdateArg) { UseShellExecute = true, Verb = "runas" });
+            }
         }
 
         /// <summary>刪掉上次更新留下的 .old (上次執行中的 exe / dll，現在已經沒在用了)</summary>

@@ -26,7 +26,7 @@ namespace SmartRemote.Tray
         const uint NIF_MESSAGE = 0x1, NIF_ICON = 0x2, NIF_TIP = 0x4;
         const uint GMEM_MOVEABLE = 0x0002, CF_UNICODETEXT = 13;
 
-        const int CmdNone = 0, CmdCopyCode = 1, CmdCopyUrl = 2, CmdControl = 3, CmdPause = 4, CmdRecord = 5, CmdSettings = 6, CmdLogs = 7, CmdExit = 8, CmdUpdate = 9;
+        const int CmdNone = 0, CmdCopyCode = 1, CmdCopyUrl = 2, CmdControl = 3, CmdPause = 4, CmdRecord = 5, CmdSettings = 6, CmdLogs = 7, CmdExit = 8, CmdUpdate = 9, CmdAutoStart = 10;
 
         static readonly ConcurrentQueue<Action> queue = new();
         static TrayIcon current; // 視窗程序是靜態函式，要用這個找到實例
@@ -34,12 +34,14 @@ namespace SmartRemote.Tray
         readonly IntPtr hwnd;
         readonly string room, password;
         bool exiting;
+        bool autoStart;   // 開機自動啟動 (設定檔 autoStart，右鍵選單切換)
 
         public TrayIcon(Settings settings)
         {
             current = this;
             room = settings.Room != "" ? settings.Room : RemoteView.RandomCode(8);
             password = settings.Password != "" ? settings.Password : RemoteView.RandomCode(10);
+            autoStart = settings.AutoStart;
 
             IntPtr instance = GetModuleHandleW(IntPtr.Zero);
             IntPtr className = Marshal.StringToHGlobalUni("SmartRemoteTray");   // 程式結束前一直用，不釋放
@@ -120,6 +122,7 @@ namespace SmartRemote.Tray
             Add(menu, MF_STRING | (RemoteView.AllowControl ? MF_CHECKED : 0), CmdControl, "允許遙控");
             Add(menu, MF_STRING | (RemoteView.Paused ? MF_CHECKED : 0), CmdPause, "中斷所有連線並暫停接受");
             Add(menu, MF_STRING, CmdUpdate, "檢查更新");
+            Add(menu, MF_STRING | (autoStart ? MF_CHECKED : 0), CmdAutoStart, "開機自動啟動");
             Add(menu, MF_SEPARATOR, 0, null);
             Add(menu, MF_STRING, CmdRecord, "開啟連線紀錄");
             Add(menu, MF_STRING, CmdSettings, "開啟設定檔");
@@ -147,6 +150,7 @@ namespace SmartRemote.Tray
                 case CmdSettings: OpenPath(Settings.FilePath); break;
                 case CmdLogs: OpenPath(AppPaths.InBaseDir("logs")); break;
                 case CmdUpdate: CheckForUpdate(); break;
+                case CmdAutoStart: ToggleAutoStart(); break;
                 case CmdExit: Exit(); break;
             }
         }
@@ -184,6 +188,29 @@ namespace SmartRemote.Tray
                     Exit();
                 });
             }) { IsBackground = true, Name = "ManualUpdate" }.Start();
+        }
+
+        // 開機自動啟動：建立 / 刪掉工作排程 (最高權限) 並寫回設定檔；結果顯示在圖示的提示文字 (不跳通知)
+        void ToggleAutoStart()
+        {
+            bool wanted = !autoStart;
+            ShowTip(wanted ? "設定開機自動啟動中…" : "取消開機自動啟動中…");
+            new Thread(() =>
+            {
+                bool ok = wanted ? AutoStart.Enable() : AutoStart.Disable();
+                Post(() =>
+                {
+                    if (!ok)
+                    {
+                        ShowTip(wanted ? "開機自動啟動設定失敗，請看日誌資料夾" : "取消開機自動啟動失敗，請看日誌資料夾");
+                        return;
+                    }
+                    autoStart = wanted;
+                    try { Settings.SaveAutoStart(wanted); }
+                    catch (Exception ex) { Logger.Warn($"設定檔存不了 autoStart：{ex.Message}"); }
+                    ShowTip(wanted ? "已設定開機自動啟動" : "已取消開機自動啟動");
+                });
+            }) { IsBackground = true, Name = "AutoStart" }.Start();
         }
 
         // 圖示的提示文字顯示指定的字 (例如檢查更新的結果)；下一次狀態改變時會回到連線狀態

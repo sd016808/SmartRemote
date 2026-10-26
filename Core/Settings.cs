@@ -7,12 +7,14 @@ namespace SmartRemote.Core
     /// 設定檔 settings.json (跟 exe 放在同一層)：
     /// room / password 不填 = 每次啟動隨機產生；填了就固定 (書籤存一次就好)
     /// control：false = 只能看；true = 還能遙控這台電腦 (滑鼠、鍵盤、剪貼簿、傳檔案)
+    /// autoStart：開機 (使用者登入) 時自動啟動 (工作排程器、最高權限)，預設 false；右鍵選單也能切換
     /// </summary>
     public sealed class Settings
     {
         [JsonPropertyName("room")] public string Room { get; set; } = "";
         [JsonPropertyName("password")] public string Password { get; set; } = "";
         [JsonPropertyName("control")] public bool Control { get; set; }
+        [JsonPropertyName("autoStart")] public bool AutoStart { get; set; }
 
         public static string FilePath => AppPaths.InBaseDir("settings.json");
 
@@ -22,7 +24,9 @@ namespace SmartRemote.Core
               "room": "",
               "password": "",
               // false = 只能看；true = 可以遙控這台電腦 (知道房間碼和密碼的人就能操作，密碼請設長一點)
-              "control": false
+              "control": false,
+              // true = 開機 (登入 Windows) 時自動啟動，以系統管理員權限執行；右鍵選單「開機自動啟動」也能切換
+              "autoStart": false
             }
             """;
 
@@ -39,6 +43,27 @@ namespace SmartRemote.Core
             s.Room = Code(s.Room, "room", 4);
             s.Password = ValidPassword(s.Password);
             return s;
+        }
+
+        /// <summary>把 autoStart 寫回設定檔 (右鍵選單切換時)：只改這一個值，其他內容與註解照舊；舊設定檔沒有這一行就加在最後</summary>
+        public static void SaveAutoStart(bool value)
+        {
+            string text = File.Exists(FilePath) ? File.ReadAllText(FilePath) : Example;
+            File.WriteAllText(FilePath, WithAutoStart(text, value));
+        }
+
+        // 純函式：設定檔文字裡的 autoStart 換成 value
+        internal static string WithAutoStart(string text, bool value)
+        {
+            string v = value ? "true" : "false";
+            var existing = System.Text.RegularExpressions.Regex.Match(text, @"""autoStart""\s*:\s*(true|false)");
+            if (existing.Success)
+                return text[..existing.Groups[1].Index] + v + text[(existing.Groups[1].Index + existing.Groups[1].Length)..];
+            int end = text.LastIndexOf('}');
+            if (end < 0) return text;
+            string body = text[..end].TrimEnd();
+            if (!body.EndsWith(",") && !body.EndsWith("{")) body += ",";
+            return body + "\n  // true = 開機 (登入 Windows) 時自動啟動，以系統管理員權限執行；右鍵選單「開機自動啟動」也能切換\n  \"autoStart\": " + v + "\n}\n";
         }
 
         // 房間碼：轉大寫；只能英數 - _ (觀看頁網址 #房間碼/密碼 用到)

@@ -54,6 +54,7 @@ namespace SmartRemote
                 return 1;
             }
 
+            AutoStart.SyncInBackground(settings.AutoStart);   // 排程跟設定一致 (exe 搬過資料夾時路徑會更新)
             new TrayIcon(settings).Run();
             return 0;
         }
