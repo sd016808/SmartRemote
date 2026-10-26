@@ -58,7 +58,7 @@ namespace SmartRemote.Core
             _ = Task.Run(Listen);
         }
 
-        /// <summary>本機一鍵中斷 (Ctrl+F7)：中斷所有觀看端並暫停接受新連線，再按一次恢復。回傳 true = 現在是暫停中</summary>
+        /// <summary>本機一鍵中斷 (系統匣選單)：中斷所有觀看端並暫停接受新連線，再按一次恢復。回傳 true = 現在是暫停中</summary>
         public static bool TogglePause()
         {
             paused = !paused;
