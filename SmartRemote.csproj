@@ -7,7 +7,7 @@
     <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Product>SmartRemote</Product>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <!-- 組件版本跟著 Version 走 (程式用它判斷有沒有新版) -->
     <AssemblyVersion>$(Version)</AssemblyVersion>
     <FileVersion>$(Version)</FileVersion>
