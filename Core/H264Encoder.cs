@@ -17,6 +17,8 @@ namespace SmartRemote.Core
         /// <summary>true = 顯示卡的硬體編碼器</summary>
         public bool Hardware { get; }
         public string Name { get; }
+        public int Fps { get; }
+        public int Bitrate { get; private set; }
 
         IntPtr activate, transform, codecApi, events, outSample, outBuffer;
         uint inStream, outStream;
@@ -150,6 +152,8 @@ namespace SmartRemote.Core
             Height = height;
             Hardware = activate != IntPtr.Zero;
             Name = name;
+            Fps = fps;
+            Bitrate = bitrate;
             this.activate = activate;
             frameSize = width * height * 3 / 2;
             try
@@ -242,6 +246,14 @@ namespace SmartRemote.Core
                 Dispose();
                 throw;
             }
+        }
+
+        /// <summary>編碼途中改碼率 (自動畫質用)；編碼器不支援就回傳 false (呼叫端重建編碼器)</summary>
+        public bool SetBitrate(int bitrate)
+        {
+            if (SetCodec(CODECAPI_AVEncCommonMeanBitRate, (uint)bitrate) < 0) return false;
+            Bitrate = bitrate;
+            return true;
         }
 
         /// <summary>編碼一張 (BGRA，大小要跟建立時一樣)；回傳 H.264 Annex B，編碼器還沒吐出東西時回傳 null</summary>
@@ -496,13 +508,13 @@ namespace SmartRemote.Core
         }
 
         // ICodecAPI.SetValue = 9；不支援的設定就算了 (用編碼器預設值)
-        void SetCodec(in Guid key, uint value) => SetCodecValue(key, new Variant { Type = 19, UInt = value }); // VT_UI4
-        void SetCodecBool(in Guid key, bool value) => SetCodecValue(key, new Variant { Type = 11, Bool = (short)(value ? -1 : 0) }); // VT_BOOL
+        int SetCodec(in Guid key, uint value) => SetCodecValue(key, new Variant { Type = 19, UInt = value }); // VT_UI4
+        int SetCodecBool(in Guid key, bool value) => SetCodecValue(key, new Variant { Type = 11, Bool = (short)(value ? -1 : 0) }); // VT_BOOL
 
-        void SetCodecValue(in Guid key, Variant v)
+        int SetCodecValue(in Guid key, Variant v)
         {
-            if (codecApi == IntPtr.Zero) return;
-            fixed (Guid* k = &key) ((delegate* unmanaged[Stdcall]<IntPtr, Guid*, Variant*, int>)Native.Slot(codecApi, 9))(codecApi, k, &v);
+            if (codecApi == IntPtr.Zero) return unchecked((int)0x80004001); // E_NOTIMPL
+            fixed (Guid* k = &key) return ((delegate* unmanaged[Stdcall]<IntPtr, Guid*, Variant*, int>)Native.Slot(codecApi, 9))(codecApi, k, &v);
         }
 
         int Message(uint msg) => ((delegate* unmanaged[Stdcall]<IntPtr, uint, nuint, int>)Native.Slot(transform, 23))(transform, msg, 0);

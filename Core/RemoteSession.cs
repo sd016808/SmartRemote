@@ -26,6 +26,15 @@ namespace SmartRemote.Core
         };
         static readonly Quality OldViewer = new(1280, 0, 3, 55, 330); // 舊版觀看頁：跟 v1.15 一樣
 
+        // 自動畫質 (觀看頁的 quality = 3)：觀看頁看網路狀況送來碼率 ({"t":"rate","b":...})，解析度跟張數跟著碼率走。
+        // 碼率低時縮小畫面 (同樣碼率，畫面小一點反而清楚)；很低時改每秒 30 張
+        const int AutoQuality = 3, AutoMinBitrate = 500_000, AutoMaxBitrate = 20_000_000;
+        static readonly int[] AutoWidths = { 1280, 1920, int.MaxValue };
+        static readonly int[] AutoDown = { 0, 2_500_000, 6_000_000 }; // 碼率低於這個就降一級解析度
+        static readonly int[] AutoUp = { 0, 3_500_000, 9_000_000 };   // 碼率到這個才升一級 (跟 AutoDown 錯開，避免來回切)
+        volatile int autoBitrate = 10_000_000, autoTier = 2;
+        long autoTierAt;
+
         public string Id { get; }
         public bool Control { get; private set; }
         public bool Connected => connectedAt != null;
@@ -175,7 +184,33 @@ namespace SmartRemote.Core
             w.WriteBoolean("video", video);
             w.WriteBoolean("control", Control);
             w.WriteBoolean("hw", video && H264Encoder.HasHardware);
+            w.WriteBoolean("auto", video);
         });
+
+        // 現在要用的畫質：舊版觀看頁固定；自動 = 觀看頁送來的碼率加上對應的解析度 / 張數
+        Quality CurrentQuality(int qi)
+        {
+            if (!newViewer) return OldViewer;
+            if (qi != AutoQuality) return Qualities[qi];
+            int b = autoBitrate;
+            return new Quality(AutoWidths[autoTier], b, b < 1_500_000 ? 30 : 60, 60, 120);
+        }
+
+        // 解析度往下馬上換；往上至少隔 10 秒 (每換一次都要重建編碼器、重送關鍵畫格，不要來回切)
+        void SetAutoBitrate(int bitrate)
+        {
+            int b = Math.Clamp(bitrate, AutoMinBitrate, AutoMaxBitrate), tier = autoTier, want = tier;
+            while (want > 0 && b < AutoDown[want]) want--;
+            while (want < AutoWidths.Length - 1 && b >= AutoUp[want + 1]) want++;
+            long now = Environment.TickCount64;
+            if (want < tier || (want > tier && now - autoTierAt >= 10_000))
+            {
+                autoTier = want;
+                autoTierAt = now;
+                Logger.Info($"[遠端畫面] 觀看端 {Id} 自動畫質：{(AutoWidths[want] == int.MaxValue ? "原始解析度" : $"寬 {AutoWidths[want]}")}，{b / 1_000_000.0:0.0} Mbps");
+            }
+            autoBitrate = b;
+        }
 
         void OnMessage(JsonElement m)
         {
@@ -186,7 +221,14 @@ namespace SmartRemote.Core
                     screen = m.GetProperty("i").GetInt32();
                     return;
                 case "quality":
-                    quality = Math.Clamp(m.GetProperty("q").GetInt32(), 0, Qualities.Length - 1);
+                    quality = Math.Clamp(m.GetProperty("q").GetInt32(), 0, AutoQuality);
+                    return;
+                case "rate": // 自動畫質：觀看頁算出來的碼率
+                    SetAutoBitrate(m.GetProperty("b").GetInt32());
+                    return;
+                case "ping": // 觀看頁量來回時間 (自動畫質用)：原樣送回去
+                    double ts = m.GetProperty("ts").GetDouble();
+                    SendJson(w => { w.WriteString("t", "pong"); w.WriteNumber("ts", ts); });
                     return;
                 case "encoder": // 觀看頁選硬體 / 軟體編碼
                     wantHardware = m.GetProperty("hw").GetBoolean();
@@ -246,7 +288,7 @@ namespace SmartRemote.Core
             {
                 while (closed == 0 && main.readyState == RTCDataChannelState.open)
                 {
-                    Quality q = newViewer ? Qualities[quality] : OldViewer;
+                    Quality q = CurrentQuality(quality);
                     int frameMs = video ? 1000 / q.Fps : q.JpegMs;
                     long wait = lastSent + frameMs - clock.ElapsedMilliseconds;
                     Native.PreciseSleep((int)wait);
@@ -322,11 +364,13 @@ namespace SmartRemote.Core
                     using Mat img = Interlocked.Exchange(ref pending, null);
                     if (img == null) continue;
                     int qi = quality;
-                    Quality q = Qualities[qi];
+                    Quality q = CurrentQuality(qi);
                     (int w, int h) = VideoSize(img.Width, img.Height, q.MaxWidth);
                     using Mat small = img.Width == w && img.Height == h ? null : img.Resize(new OpenCvSharp.Size(w, h), 0, 0, InterpolationFlags.Area);
                     bool hw = wantHardware;
-                    if (encoder == null || encoder.Width != w || encoder.Height != h || encodedQuality != qi || encodedHardware != hw)
+                    bool rebuild = encoder == null || encoder.Width != w || encoder.Height != h || encoder.Fps != q.Fps || encodedQuality != qi || encodedHardware != hw;
+                    if (!rebuild && encoder.Bitrate != q.Bitrate) rebuild = !encoder.SetBitrate(q.Bitrate); // 自動畫質改碼率：編碼器不能途中改就重建
+                    if (rebuild)
                     {
                         encoder?.Dispose();
                         encoder = null;

@@ -149,7 +149,7 @@
     <span id="stats"></span>
     <div class="controls">
       <select id="screens" class="hidden" aria-label="螢幕"></select>
-      <select id="quality" class="hidden" aria-label="畫質" title="畫質 (都是每秒 60 張)：省流量 = 寬 1280、約 2.5 Mbps / 標準 = 寬 1920、約 6 Mbps / 清晰 = 原始解析度、最高 20 Mbps (網路要很快)">
+      <select id="quality" class="hidden" aria-label="畫質" title="畫質：自動 = 看網路狀況自動調整 (網路好時跟清晰一樣，塞車時自動降) / 省流量 = 寬 1280、約 2.5 Mbps / 標準 = 寬 1920、約 6 Mbps / 清晰 = 原始解析度、最高 20 Mbps (網路要很快)">
         <option value="0">省流量</option>
         <option value="1">標準</option>
         <option value="2">清晰</option>
@@ -299,6 +299,7 @@ function closePeer() {
   for (const id of ["kbSheet", "clipSheet", "files"]) $(id).classList.add("hidden");
   for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn", "quality", "encoder"]) $(id).classList.add("hidden");
   $("note").classList.add("hidden");
+  resetAuto();
 }
 function loginMsg(text, bad) { $("loginMsg").textContent = text || ""; $("loginMsg").className = bad ? "bad" : ""; }
 function showLogin(text, bad) {
@@ -338,6 +339,48 @@ document.addEventListener("visibilitychange", () => {
 });
 
 function send(obj) { if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj)); }
+
+// ===== 自動畫質 =====
+// 新版分享端才有 (caps.auto)。觀看頁量網路狀況、決定碼率，送給分享端 ({t:"rate", b})，解析度由分享端跟著碼率調：
+// - 一開始就用高碼率 (不像 Google 從低的慢慢加)
+// - 明確塞車才降：掉封包超過 5%，或來回時間比這陣子最低的多 100 ms 以上 (封包在路上排隊)，連續 2 秒；
+//   降到比實際收得到的量少一點 (塞車時收得到的量 ≈ 網路的上限)，一次最多降一半
+// - 網路正常、而且畫面真的有用到這麼多流量時每秒升 25% (靜止畫面不升，不然一動起來就塞爆)
+const AUTO_MIN = 500000, AUTO_MAX = 20000000, AUTO_START = 10000000;
+let autoRate = AUTO_START, autoSent = 0, autoBad = 0, autoGood = 0, autoDownAt = 0, lastLoss = null, lossRate = 0;
+let pings = [];   // 最近 30 秒的來回時間 [{at, ms}]
+const autoOn = () => !!(caps && caps.video && caps.auto) && $("quality").value === "3";
+
+function resetAuto() { autoRate = AUTO_START; autoSent = 0; autoBad = autoGood = autoDownAt = 0; lastLoss = null; lossRate = 0; pings = []; }
+
+function setAutoRate(b, force) {
+  autoRate = Math.round(Math.min(AUTO_MAX, Math.max(AUTO_MIN, b)));
+  if (force || Math.abs(autoRate - autoSent) >= autoSent * 0.05) { autoSent = autoRate; send({ t: "rate", b: autoRate }); }
+}
+
+// 來回時間：最近 3 次的中位數 (偶爾一次重送的不算)；基準 = 最近 30 秒最低的
+function rttNow() {
+  if (pings.length < 3) return null;
+  return pings.slice(-3).map(p => p.ms).sort((a, b) => a - b)[1];
+}
+function rttBase() { return pings.length ? Math.min(...pings.map(p => p.ms)) : null; }
+
+function autoTick(recvBps) {
+  const now = Date.now(), r = rttNow(), base = rttBase();
+  const queued = r !== null && base !== null ? r - base : 0;
+  if (lossRate > 0.05 || queued > 100) {
+    autoGood = 0;
+    if (++autoBad >= 2 && now - autoDownAt > 2000) {
+      setAutoRate(Math.max(autoRate * 0.5, Math.min(autoRate * 0.8, recvBps * 0.9)));
+      autoDownAt = now; autoBad = 0;
+    }
+  } else {
+    autoBad = 0;
+    if (++autoGood >= 2 && now - autoDownAt > 3000 && recvBps > autoRate * 0.5) setAutoRate(autoRate * 1.25);
+  }
+}
+
+setInterval(() => { if (caps && caps.auto) send({ t: "ping", ts: performance.now() }); }, 500);
 
 // ===== 連線 =====
 async function connect(room, pass, attempt = 1) {
@@ -460,10 +503,15 @@ function onText(ch, m) {
       // 用影像軌的話畫面在 <video>，舊版 / 不能編碼 H.264 的用 <img> (JPEG)
       video.classList.toggle("hidden", !m.video);
       img.classList.toggle("hidden", !!m.video);
-      $("quality").classList.remove("hidden");
-      $("quality").value = store.get("lash-quality", "1");
-      if (!$("quality").value) $("quality").value = "1";   // 記住的是已經沒有的選項
-      send({ t: "quality", q: Number($("quality").value) });
+      // 「自動」只有新版分享端有 (舊版會把 3 當成清晰)
+      const qs = $("quality"), autoOpt = qs.querySelector('option[value="3"]'), canAuto = !!(m.video && m.auto);
+      if (canAuto && !autoOpt) qs.insertBefore(new Option("自動", "3"), qs.firstChild);
+      if (!canAuto && autoOpt) autoOpt.remove();
+      qs.classList.remove("hidden");
+      qs.value = store.get("lash-quality", canAuto ? "3" : "1");
+      if (!qs.value) qs.value = "1";   // 記住的是已經沒有的選項
+      send({ t: "quality", q: Number(qs.value) });
+      if (autoOn()) setAutoRate(autoRate, true);
       // 電腦有顯示卡硬體編碼器才給選 (舊版分享端不會送 hw)
       $("encoder").classList.toggle("hidden", !(m.video && m.hw));
       if (m.video && m.hw) {
@@ -473,6 +521,10 @@ function onText(ch, m) {
       }
       for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn"]) $(id).classList.toggle("hidden", !m.control);
       if (m.control && store.get("lash-control", "0") === "1") setControl(true, true);
+      break;
+    case "pong":
+      pings.push({ at: Date.now(), ms: performance.now() - m.ts });
+      while (pings.length && Date.now() - pings[0].at > 30000) pings.shift();
       break;
     case "encoder":   // 電腦端實際用的編碼器
       $("encoder").title = `目前：${m.name || (m.hw ? "硬體編碼" : "軟體編碼")}`;
@@ -515,10 +567,21 @@ setInterval(async () => {
           tickBytes += (r.bytesReceived || 0) - lastVideoStats.bytesReceived;
         }
         lastVideoStats = { framesDecoded: r.framesDecoded || 0, bytesReceived: r.bytesReceived || 0 };
+        // 這一秒的掉封包率 (自動畫質用)
+        const lost = r.packetsLost || 0, got = r.packetsReceived || 0;
+        if (lastLoss) {
+          const dl = Math.max(0, lost - lastLoss.lost), dg = Math.max(0, got - lastLoss.got);
+          lossRate = dl + dg > 0 ? dl / (dl + dg) : 0;
+        }
+        lastLoss = { lost, got };
       });
     } catch {}
+    if (autoOn()) autoTick(tickBytes * 8);
   }
-  $("stats").textContent = `${tickFrames} 張/秒 · ${Math.round(tickBytes / 1024)} KB/s`;
+  const rtt = rttNow();
+  $("stats").textContent = `${tickFrames} 張/秒 · ${Math.round(tickBytes / 1024)} KB/s`
+    + (rtt !== null ? ` · 延遲 ${Math.round(rtt)} ms` : "")
+    + (autoOn() ? ` · 自動 ${(autoRate / 1e6).toFixed(1)} Mbps` : "");
   tickFrames = tickBytes = 0;
   const idle = lastFrameAt ? Math.floor((Date.now() - lastFrameAt) / 1000) : 0;
   if (idle >= 5) setState("warn", `已連線，${idle} 秒沒有新畫面`);
@@ -922,7 +985,11 @@ fit.value = store.get("lash-fit", "width");
 const applyFit = () => { for (const el of [video, img]) { el.classList.remove("width", "fit", "real"); el.classList.add(fit.value); } store.set("lash-fit", fit.value); };
 fit.onchange = applyFit;
 applyFit();
-$("quality").onchange = () => { store.set("lash-quality", $("quality").value); send({ t: "quality", q: Number($("quality").value) }); };
+$("quality").onchange = () => {
+  store.set("lash-quality", $("quality").value);
+  send({ t: "quality", q: Number($("quality").value) });
+  if (autoOn()) setAutoRate(autoRate, true);
+};
 $("encoder").onchange = () => { store.set("lash-encoder", $("encoder").value); send({ t: "encoder", hw: $("encoder").value === "hw" }); };
 
 $("room").value = store.get("lash-room", "");
