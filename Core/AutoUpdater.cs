@@ -8,8 +8,8 @@ using System.Text.Json.Serialization;
 namespace SmartRemote.Core
 {
     /// <summary>
-    /// 自動更新 (不跳任何提示)：從公開的 GitHub Release (sd016808/SmartRemote) 查最新版，比目前新就下載 zip、換上新檔、重新啟動。
-    /// - 程式啟動時檢查一次，另外可以從右鍵選單手動檢查；有人連線時不更新
+    /// 更新：從公開的 GitHub Release (sd016808/SmartRemote) 查最新版，比目前新就下載 zip、換上新檔、重新啟動。
+    /// - 只有右鍵選單「檢查更新」時才檢查 (不會自己檢查)，有新版會先問要不要更新
     /// - 換檔方式：執行中的 exe / dll 不能覆蓋，但可以改名，所以舊檔改名成 .old，新檔放進來；失敗就把舊檔改回來
     /// - 查不到、網路錯誤一律略過，只寫日誌，不影響使用
     /// </summary>
@@ -31,34 +31,44 @@ namespace SmartRemote.Core
         static bool Disabled => Environment.GetEnvironmentVariable("SMARTREMOTE_DRYRUN") == "1"
                                 || Environment.GetEnvironmentVariable("SMARTREMOTE_NO_UPDATE") == "1";
 
-        public sealed record Pending(Version Version, string Url, string Name);
+        public sealed record Pending(Version Version, string Url, string Name, string Notes);
 
-        /// <summary>查最新版；沒有更新、查不到、網路錯誤都回傳 null</summary>
-        public static Pending Check()
+        /// <summary>查最新版：有新版回傳新版資訊；已是最新版回傳 null；查不到 (沒網路、GitHub 連不上…) 回傳 null 並給 error</summary>
+        public static Pending Check(out string error)
         {
-            if (Disabled) return null;
+            error = null;
+            if (Disabled)
+            {
+                error = "測試模式 (SMARTREMOTE_DRYRUN / SMARTREMOTE_NO_UPDATE) 不檢查更新";
+                return null;
+            }
             try
             {
                 using var http = NewHttp(TimeSpan.FromSeconds(10));
                 string json = http.GetStringAsync(LatestReleaseUrl).GetAwaiter().GetResult();
                 var release = JsonSerializer.Deserialize(json, UpdateJsonContext.Default.GitHubRelease);
                 if (release == null || !TryParseVersion(release.TagName, out Version latest))
+                {
+                    error = $"看不懂最新版的版本號 ({release?.TagName})";
                     return null;
+                }
                 if (latest <= CurrentVersion) return null;
 
                 var zip = release.Assets?.FirstOrDefault(a => a.Name != null && a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase));
                 if (zip?.DownloadUrl == null)
                 {
                     Logger.Warn($"檢查更新：最新版 {release.TagName} 沒有 zip 檔，略過");
+                    error = $"最新版 {release.TagName} 沒有安裝檔 (zip)";
                     return null;
                 }
                 Logger.Info($"檢查更新：發現 v{latest} (目前 v{CurrentVersion})");
-                return new Pending(latest, zip.DownloadUrl, zip.Name);
+                return new Pending(latest, zip.DownloadUrl, zip.Name, release.Body?.Trim());
             }
             catch (Exception ex)
             {
                 // 沒網路、GitHub 連不上、還沒有任何 Release (404) 都會到這裡
-                Logger.Warn($"檢查更新失敗 (略過，不影響使用): {ex.Message}");
+                Logger.Warn($"檢查更新失敗: {ex.Message}");
+                error = ex.Message;
                 return null;
             }
         }
@@ -160,6 +170,7 @@ namespace SmartRemote.Core
     public sealed class GitHubRelease
     {
         [JsonPropertyName("tag_name")] public string TagName { get; set; }
+        [JsonPropertyName("body")] public string Body { get; set; } // 更新說明
         [JsonPropertyName("assets")] public List<GitHubAsset> Assets { get; set; } = new List<GitHubAsset>();
     }
 

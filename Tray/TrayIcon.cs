@@ -155,38 +155,53 @@ namespace SmartRemote.Tray
             }
         }
 
-        // 手動檢查更新：在背景查，結果用圖示的提示文字顯示 (不跳通知)；有新版就換檔、重新啟動
+        // 手動檢查更新 (只有這裡會檢查)：在背景查，結果跳對話框；有新版先問要不要更新，按「是」才換檔、重新啟動。
+        // 對話框在背景執行緒跳 (會等使用者按)，系統匣照常運作
+        int updating;
+
         void CheckForUpdate()
         {
-            if (RemoteView.Connections > 0)
-            {
-                ShowTip("有人連線中，不能更新，請稍後再檢查");
-                return;
-            }
+            if (Interlocked.Exchange(ref updating, 1) == 1) return; // 上一次的還沒結束 (對話框還開著)
             ShowTip("檢查更新中…");
             new Thread(() =>
             {
-                AutoUpdater.Pending update = AutoUpdater.Check();
-                if (update == null)
+                const string Title = "SmartRemote 檢查更新";
+                try
                 {
-                    Post(() => ShowTip($"已是最新版 v{AutoUpdater.CurrentVersion}"));
-                    return;
+                    AutoUpdater.Pending update = AutoUpdater.Check(out string error);
+                    Post(UpdateTip);
+                    if (error != null)
+                    {
+                        Win32.Message($"檢查更新失敗，請確認網路連線後再試一次。\n\n{error}", Title, Win32.MB_ICONERROR);
+                        return;
+                    }
+                    if (update == null)
+                    {
+                        Win32.Message($"已是最新版 (v{AutoUpdater.CurrentVersion})。", Title, Win32.MB_ICONINFORMATION);
+                        return;
+                    }
+
+                    string notes = string.IsNullOrEmpty(update.Notes) ? "" : $"\n\n更新內容：\n{(update.Notes.Length > 800 ? update.Notes[..800] + "…" : update.Notes)}";
+                    int viewers = RemoteView.Connections;
+                    string warn = viewers > 0 ? $"\n\n目前有 {viewers} 個人連線中，更新時程式會重新啟動，連線會中斷。" : "\n\n更新時程式會重新啟動。";
+                    if (Win32.Message($"有新版 v{update.Version} (目前 v{AutoUpdater.CurrentVersion})，要現在更新嗎？{notes}{warn}",
+                                      Title, Win32.MB_YESNO | Win32.MB_ICONQUESTION) != Win32.IDYES)
+                        return;
+
+                    Post(() => ShowTip($"下載更新 v{update.Version} 中…"));
+                    if (!AutoUpdater.Install(update))
+                    {
+                        Post(UpdateTip);
+                        Win32.Message("更新失敗，已還原成原本的版本。詳細原因請看日誌資料夾 (右鍵圖示 →「開啟日誌資料夾」)。", Title, Win32.MB_ICONERROR);
+                        return;
+                    }
+                    Post(() =>
+                    {
+                        AutoUpdater.Relaunch();
+                        Exit();
+                    });
                 }
-                if (RemoteView.Connections > 0)
-                {
-                    Post(() => ShowTip("有人連線中，不能更新，請稍後再檢查"));
-                    return;
-                }
-                if (!AutoUpdater.Install(update))
-                {
-                    Post(() => ShowTip("更新失敗，請看日誌資料夾"));
-                    return;
-                }
-                Post(() =>
-                {
-                    AutoUpdater.Relaunch();
-                    Exit();
-                });
+                finally { Interlocked.Exchange(ref updating, 0); }
             }) { IsBackground = true, Name = "ManualUpdate" }.Start();
         }
 
