@@ -55,7 +55,16 @@
   .hint { margin:18px 0 0; padding-top:14px; border-top:1px solid var(--line); font-size:12px; color:var(--muted); }
 
   /* ===== 觀看畫面 ===== */
-  #viewer { height:100%; display:flex; flex-direction:column; }
+  #viewer { height:100%; display:flex; flex-direction:column; position:relative; }
+  /* 工具列收起來：畫面變大，上方中間留一個小把手可以展開 (放中間比較不會擋到視窗的關閉鈕、開始鈕) */
+  #viewer.collapsed .bar { display:none; }
+  #viewer.collapsed #note { top:40px; }
+  #barHandle { position:absolute; left:50%; top:0; transform:translateX(-50%); z-index:15; display:none;
+               align-items:center; gap:6px; padding:3px 14px 5px; border:1px solid var(--line); border-top:0;
+               border-radius:0 0 10px 10px; background:var(--panel); color:var(--fg); opacity:.7; cursor:pointer; }
+  #barHandle:hover, #barHandle:focus-visible { opacity:1; }
+  #viewer.collapsed #barHandle { display:inline-flex; }
+  .btn.icon { padding:5px 8px; }
   .bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 16px;
          background:var(--panel); border-bottom:1px solid var(--line); }
   .state { display:flex; align-items:center; gap:8px; flex:1; min-width:0; }
@@ -147,17 +156,28 @@
   <div class="bar">
     <div class="state"><span class="dot" id="dot"></span><span id="stateText"></span></div>
     <span id="stats"></span>
+    <button class="btn icon" id="hideBar" type="button" title="收起工具列 (畫面變大；按上方中間的小把手展開)" aria-label="收起工具列">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg>
+    </button>
     <div class="controls">
       <select id="screens" class="hidden" aria-label="螢幕"></select>
-      <select id="quality" class="hidden" aria-label="畫質" title="畫質 (都是每秒 60 張)：省流量 = 寬 1280、約 2.5 Mbps / 標準 = 寬 1920、約 6 Mbps / 清晰 = 原始解析度、最高 20 Mbps (網路要很快)">
+      <select id="quality" class="hidden" aria-label="畫質" title="畫質：自動 = 看網路狀況自動調整 (網路好時跟清晰一樣，塞車時自動降) / 省流量 = 寬 1280、約 2.5 Mbps / 標準 = 寬 1920、約 6 Mbps / 清晰 = 原始解析度、最高 20 Mbps (網路要很快)">
         <option value="0">省流量</option>
         <option value="1">標準</option>
         <option value="2">清晰</option>
+      </select>
+      <select id="encoder" class="hidden" aria-label="編碼" title="電腦端怎麼壓縮畫面：硬體編碼 = 用顯示卡 (比較不吃電腦的 CPU)；軟體編碼 = 用 CPU (畫面怪怪的或延遲變大時可以試試)">
+        <option value="hw">硬體編碼</option>
+        <option value="sw">軟體編碼</option>
       </select>
       <select id="fit" aria-label="顯示方式">
         <option value="width">填滿寬度</option>
         <option value="fit">整個畫面</option>
         <option value="real">原始大小</option>
+      </select>
+      <select id="touchMode" class="hidden" aria-label="觸控方式" title="手機遙控時怎麼移動滑鼠：絕對座標 = 點哪裡游標就到哪裡；相對座標 = 像筆電的觸控板，手指滑多少游標就移多少，點一下在游標的位置按左鍵">
+        <option value="abs">絕對座標</option>
+        <option value="rel">相對座標</option>
       </select>
       <button class="btn hidden" id="ctl" type="button" title="遙控：滑鼠 / 觸控 / 鍵盤直接操作電腦">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4l7 17 2.5-7.5L21 11z"/></svg><span class="label">遙控</span>
@@ -175,6 +195,10 @@
       <button class="btn danger" id="disconnect" type="button">中斷連線</button>
     </div>
   </div>
+  <button id="barHandle" type="button" title="展開工具列" aria-label="展開工具列">
+    <span class="dot" id="handleDot"></span>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+  </button>
   <div id="stage" tabindex="-1">
     <video id="video" class="media hidden" autoplay muted playsinline></video>
     <img id="screen" class="media" alt="" draggable="false">
@@ -293,8 +317,9 @@ function closePeer() {
   if (e) e.close();
   setControl(false, true);
   for (const id of ["kbSheet", "clipSheet", "files"]) $(id).classList.add("hidden");
-  for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn", "quality"]) $(id).classList.add("hidden");
+  for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn", "quality", "encoder", "touchMode"]) $(id).classList.add("hidden");
   $("note").classList.add("hidden");
+  resetAuto();
 }
 function loginMsg(text, bad) { $("loginMsg").textContent = text || ""; $("loginMsg").className = bad ? "bad" : ""; }
 function showLogin(text, bad) {
@@ -310,7 +335,7 @@ function showLogin(text, bad) {
   document.title = "SmartRemote 遠端畫面";
 }
 function showViewer() { $("login").classList.add("hidden"); $("viewer").classList.remove("hidden"); }
-function setState(kind, text) { $("dot").className = "dot " + kind; $("stateText").textContent = text; }
+function setState(kind, text) { $("dot").className = $("handleDot").className = "dot " + kind; $("stateText").textContent = text; $("barHandle").title = `展開工具列 (${text})`; }
 function overlay(text) { $("overlay").textContent = text || ""; $("overlay").classList.toggle("hidden", !text); }
 // 連線進度：第一次連線顯示在卡片上；看畫面時斷線重連顯示在畫面上
 function progress(text) { if (everConnected) { setState("warn", text); overlay(text); } else loginMsg(text); }
@@ -334,6 +359,48 @@ document.addEventListener("visibilitychange", () => {
 });
 
 function send(obj) { if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj)); }
+
+// ===== 自動畫質 =====
+// 新版分享端才有 (caps.auto)。觀看頁量網路狀況、決定碼率，送給分享端 ({t:"rate", b})，解析度由分享端跟著碼率調：
+// - 一開始就用高碼率 (不像 Google 從低的慢慢加)
+// - 明確塞車才降：掉封包超過 5%，或來回時間比這陣子最低的多 100 ms 以上 (封包在路上排隊)，連續 2 秒；
+//   降到比實際收得到的量少一點 (塞車時收得到的量 ≈ 網路的上限)，一次最多降一半
+// - 網路正常、而且畫面真的有用到這麼多流量時每秒升 25% (靜止畫面不升，不然一動起來就塞爆)
+const AUTO_MIN = 500000, AUTO_MAX = 20000000, AUTO_START = 10000000;
+let autoRate = AUTO_START, autoSent = 0, autoBad = 0, autoGood = 0, autoDownAt = 0, lastLoss = null, lossRate = 0;
+let pings = [];   // 最近 30 秒的來回時間 [{at, ms}]
+const autoOn = () => !!(caps && caps.video && caps.auto) && $("quality").value === "3";
+
+function resetAuto() { autoRate = AUTO_START; autoSent = 0; autoBad = autoGood = autoDownAt = 0; lastLoss = null; lossRate = 0; pings = []; }
+
+function setAutoRate(b, force) {
+  autoRate = Math.round(Math.min(AUTO_MAX, Math.max(AUTO_MIN, b)));
+  if (force || Math.abs(autoRate - autoSent) >= autoSent * 0.05) { autoSent = autoRate; send({ t: "rate", b: autoRate }); }
+}
+
+// 來回時間：最近 3 次的中位數 (偶爾一次重送的不算)；基準 = 最近 30 秒最低的
+function rttNow() {
+  if (pings.length < 3) return null;
+  return pings.slice(-3).map(p => p.ms).sort((a, b) => a - b)[1];
+}
+function rttBase() { return pings.length ? Math.min(...pings.map(p => p.ms)) : null; }
+
+function autoTick(recvBps) {
+  const now = Date.now(), r = rttNow(), base = rttBase();
+  const queued = r !== null && base !== null ? r - base : 0;
+  if (lossRate > 0.05 || queued > 100) {
+    autoGood = 0;
+    if (++autoBad >= 2 && now - autoDownAt > 2000) {
+      setAutoRate(Math.max(autoRate * 0.5, Math.min(autoRate * 0.8, recvBps * 0.9)));
+      autoDownAt = now; autoBad = 0;
+    }
+  } else {
+    autoBad = 0;
+    if (++autoGood >= 2 && now - autoDownAt > 3000 && recvBps > autoRate * 0.5) setAutoRate(autoRate * 1.25);
+  }
+}
+
+setInterval(() => { if (caps && caps.auto) send({ t: "ping", ts: performance.now() }); }, 500);
 
 // ===== 連線 =====
 async function connect(room, pass, attempt = 1) {
@@ -456,12 +523,33 @@ function onText(ch, m) {
       // 用影像軌的話畫面在 <video>，舊版 / 不能編碼 H.264 的用 <img> (JPEG)
       video.classList.toggle("hidden", !m.video);
       img.classList.toggle("hidden", !!m.video);
-      $("quality").classList.remove("hidden");
-      $("quality").value = store.get("lash-quality", "1");
-      if (!$("quality").value) $("quality").value = "1";   // 記住的是已經沒有的選項
-      send({ t: "quality", q: Number($("quality").value) });
+      // 「自動」只有新版分享端有 (舊版會把 3 當成清晰)
+      const qs = $("quality"), autoOpt = qs.querySelector('option[value="3"]'), canAuto = !!(m.video && m.auto);
+      if (canAuto && !autoOpt) qs.insertBefore(new Option("自動", "3"), qs.firstChild);
+      if (!canAuto && autoOpt) autoOpt.remove();
+      qs.classList.remove("hidden");
+      qs.value = store.get("lash-quality", canAuto ? "3" : "1");
+      if (!qs.value) qs.value = "1";   // 記住的是已經沒有的選項
+      send({ t: "quality", q: Number(qs.value) });
+      if (autoOn()) setAutoRate(autoRate, true);
+      // 電腦有顯示卡硬體編碼器才給選 (舊版分享端不會送 hw)
+      $("encoder").classList.toggle("hidden", !(m.video && m.hw));
+      if (m.video && m.hw) {
+        $("encoder").value = store.get("lash-encoder", "hw");
+        if (!$("encoder").value) $("encoder").value = "hw";
+        send({ t: "encoder", hw: $("encoder").value === "hw" });
+      }
       for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn"]) $(id).classList.toggle("hidden", !m.control);
+      $("touchMode").classList.toggle("hidden", !(m.control && isTouch));
       if (m.control && store.get("lash-control", "0") === "1") setControl(true, true);
+      break;
+    case "pong":
+      pings.push({ at: Date.now(), ms: performance.now() - m.ts });
+      while (pings.length && Date.now() - pings[0].at > 30000) pings.shift();
+      break;
+    case "encoder":   // 電腦端實際用的編碼器
+      $("encoder").title = `目前：${m.name || (m.hw ? "硬體編碼" : "軟體編碼")}`;
+      if (!m.hw && $("encoder").value === "hw" && !$("encoder").classList.contains("hidden")) toast("電腦的硬體編碼不能用，已改用軟體編碼");
       break;
     case "note":
       $("note").textContent = m.s || "";
@@ -500,10 +588,24 @@ setInterval(async () => {
           tickBytes += (r.bytesReceived || 0) - lastVideoStats.bytesReceived;
         }
         lastVideoStats = { framesDecoded: r.framesDecoded || 0, bytesReceived: r.bytesReceived || 0 };
+        // 這一秒的掉封包率 (自動畫質用)
+        const lost = r.packetsLost || 0, got = r.packetsReceived || 0;
+        if (lastLoss) {
+          const dl = Math.max(0, lost - lastLoss.lost), dg = Math.max(0, got - lastLoss.got);
+          lossRate = dl + dg > 0 ? dl / (dl + dg) : 0;
+        }
+        lastLoss = { lost, got };
       });
     } catch {}
+    if (autoOn()) autoTick(tickBytes * 8);
   }
-  $("stats").textContent = `${tickFrames} 張/秒 · ${Math.round(tickBytes / 1024)} KB/s`;
+  const rtt = rttNow();
+  // 手機寬度不夠：用短的格式，不然「已連線」會被擠掉
+  $("stats").textContent = narrow.matches
+    ? `${tickFrames} 張 · ${(tickBytes * 8 / 1e6).toFixed(1)} Mbps` + (rtt !== null ? ` · ${Math.round(rtt)} ms` : "") + (autoOn() ? " · 自動" : "")
+    : `${tickFrames} 張/秒 · ${Math.round(tickBytes / 1024)} KB/s`
+      + (rtt !== null ? ` · 延遲 ${Math.round(rtt)} ms` : "")
+      + (autoOn() ? ` · 自動 ${(autoRate / 1e6).toFixed(1)} Mbps` : "");
   tickFrames = tickBytes = 0;
   const idle = lastFrameAt ? Math.floor((Date.now() - lastFrameAt) / 1000) : 0;
   if (idle >= 5) setState("warn", `已連線，${idle} 秒沒有新畫面`);
@@ -529,6 +631,7 @@ function showScreens(ch, m) {
 
 // ===== 遙控 =====
 const isTouch = matchMedia("(pointer: coarse)").matches;
+const narrow = matchMedia("(max-width:760px)");
 function setControl(on, quiet) {
   controlOn = !!on && !!(caps && caps.control);
   stage.classList.toggle("control", controlOn);
@@ -536,7 +639,7 @@ function setControl(on, quiet) {
   if (!quiet) store.set("lash-control", controlOn ? "1" : "0");
   if (controlOn) {
     stage.focus({ preventScroll: true });
-    if (!quiet) toast(isTouch ? "遙控中：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動"
+    if (!quiet) toast(isTouch ? touchHelp()
                               : "遙控中：滑鼠鍵盤直接操作電腦。全螢幕時 Win、Alt+Tab 也會送過去；Ctrl + Alt + Shift 一起按 = 結束遙控", 5000);
     lockKeys();
   } else {
@@ -548,24 +651,33 @@ $("ctl").onclick = () => setControl(!controlOn);
 
 // 畫面上的位置 → 電腦螢幕上的比例 (0~1)；扣掉 object-fit 留的黑邊
 function media() { return caps && caps.video ? video : img; }
-function toRemote(e) {
+// 電腦畫面實際顯示的位置與大小 (扣掉黑邊)
+function shown() {
   const el = media(), r = el.getBoundingClientRect();
   const nw = el.videoWidth || el.naturalWidth, nh = el.videoHeight || el.naturalHeight;
   if (!nw || !nh || !r.width || !r.height) return null;
   const scale = Math.min(r.width / nw, r.height / nh);
-  const w = nw * scale, h = nh * scale, ox = (r.width - w) / 2, oy = (r.height - h) / 2;
-  const x = (e.clientX - r.left - ox) / w, y = (e.clientY - r.top - oy) / h;
-  return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)), inside: x >= 0 && x <= 1 && y >= 0 && y <= 1 };
+  const w = nw * scale, h = nh * scale;
+  return { left: r.left + (r.width - w) / 2, top: r.top + (r.height - h) / 2, w, h };
 }
+function toRemote(e) {
+  const s = shown();
+  if (!s) return null;
+  const x = (e.clientX - s.left) / s.w, y = (e.clientY - s.top) / s.h;
+  return { x: clamp01(x), y: clamp01(y), inside: x >= 0 && x <= 1 && y >= 0 && y <= 1 };
+}
+const clamp01 = v => Math.min(1, Math.max(0, v));
 
 // 滑鼠移動很頻繁：每個畫面更新 (rAF) 最多送一次最新的位置
 let pendingMove = null;
+let cursor = { x: 0.5, y: 0.5 };   // 最後送出的游標位置 (電腦螢幕上的比例)；相對座標從這裡開始移動
 function queueMove(p) {
+  cursor = { x: p.x, y: p.y };
   if (!pendingMove) requestAnimationFrame(() => { if (pendingMove) send({ t: "mm", x: pendingMove.x, y: pendingMove.y }); pendingMove = null; });
   pendingMove = p;
 }
 function flushMove() { if (pendingMove) { send({ t: "mm", x: pendingMove.x, y: pendingMove.y }); pendingMove = null; } }
-const click = (p, b = 0) => { send({ t: "md", b, x: p.x, y: p.y }); send({ t: "mu", b, x: p.x, y: p.y }); };
+const click = (p, b = 0) => { cursor = { x: p.x, y: p.y }; send({ t: "md", b, x: p.x, y: p.y }); send({ t: "mu", b, x: p.x, y: p.y }); };
 
 // --- 滑鼠 (桌機) ---
 stage.addEventListener("pointerdown", e => {
@@ -607,6 +719,30 @@ stage.addEventListener("wheel", e => {
 }, { passive: false });
 
 // --- 觸控 (手機)：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、一指滑動 = 移動游標、兩指滑動 = 捲動 ---
+// 兩種移動方式 (選單切換，會記住)：
+// - 絕對座標：點哪裡游標就到哪裡
+// - 相對座標：像筆電的觸控板，手指滑多少游標就移多少 (滑得快移得多)，點一下 / 長按都在游標目前的位置
+const touchMode = $("touchMode");
+touchMode.value = store.get("lash-touch", "abs");
+if (!touchMode.value) touchMode.value = "abs";
+const relative = () => touchMode.value === "rel";
+const touchHelp = () => relative()
+  ? "遙控中 (相對座標)：一指滑動 = 移動游標、點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動"
+  : "遙控中：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動";
+touchMode.onchange = () => { store.set("lash-touch", touchMode.value); if (controlOn) toast(touchHelp(), 5000); };
+
+// 相對座標：手指在畫面上移動 (dx, dy) → 游標移動；游標跑到看不到的地方就捲動畫面跟過去
+function moveCursor(dx, dy) {
+  const s = shown();
+  if (!s) return cursor;
+  const k = 1 + Math.min(2, Math.hypot(dx, dy) / 12);   // 加速：慢慢滑可以點得準，快速滑可以一下移很遠
+  queueMove({ x: clamp01(cursor.x + dx * k / s.w), y: clamp01(cursor.y + dy * k / s.h) });
+  const cx = s.left + cursor.x * s.w, cy = s.top + cursor.y * s.h, r = stage.getBoundingClientRect(), m = 40;
+  if (cx < r.left + m) stage.scrollLeft -= r.left + m - cx; else if (cx > r.right - m) stage.scrollLeft += cx - (r.right - m);
+  if (cy < r.top + m) stage.scrollTop -= r.top + m - cy; else if (cy > r.bottom - m) stage.scrollTop += cy - (r.bottom - m);
+  return cursor;
+}
+
 const touches = new Map();
 let gesture = null;   // { kind: "tap" | "move" | "drag" | "two" | "scroll", start, p, timer, t0, mid }
 let lastTap = null;   // 連點兩下用同一個位置，電腦才認得是雙擊
@@ -618,9 +754,9 @@ function touchDown(e) {
   e.preventDefault();
   touches.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
   if (touches.size === 1) {
-    const p = toRemote(e);
+    const p = relative() ? { ...cursor } : toRemote(e);
     if (!p) return;
-    gesture = { kind: "tap", start: { x: e.clientX, y: e.clientY }, p, t0: Date.now() };
+    gesture = { kind: "tap", start: { x: e.clientX, y: e.clientY }, last: { x: e.clientX, y: e.clientY }, p, t0: Date.now() };
     gesture.timer = setTimeout(() => {
       if (!gesture || gesture.kind !== "tap") return;
       gesture.kind = "drag";
@@ -647,13 +783,20 @@ function touchMove(e) {
     if (dy) { send({ t: "wh", dx: 0, dy }); gesture.acc -= dy; }
     return;
   }
-  const p = toRemote(e);
-  if (!p) return;
   if (gesture.kind === "tap" && Math.hypot(e.clientX - gesture.start.x, e.clientY - gesture.start.y) > 10) {
     clearTimeout(gesture.timer);
     gesture.kind = "move";
   }
-  if (gesture.kind === "move" || gesture.kind === "drag") { gesture.p = p; queueMove(p); }
+  if (gesture.kind !== "move" && gesture.kind !== "drag") return;
+  if (relative()) {
+    gesture.p = moveCursor(e.clientX - gesture.last.x, e.clientY - gesture.last.y);
+    gesture.last = { x: e.clientX, y: e.clientY };
+    return;
+  }
+  const p = toRemote(e);
+  if (!p) return;
+  gesture.p = p;
+  queueMove(p);
 }
 function touchUp(e) {
   if (!touches.delete(e.pointerId) || !gesture) return;
@@ -902,12 +1045,23 @@ if (document.fullscreenEnabled) {
   });
 } else $("full").classList.add("hidden");   // iPhone 的 Safari 不支援
 
+// 工具列收起 / 展開 (會記住)
+const setBar = open => { $("viewer").classList.toggle("collapsed", !open); store.set("lash-bar", open ? "1" : "0"); };
+$("hideBar").onclick = () => setBar(false);
+$("barHandle").onclick = () => setBar(true);
+setBar(store.get("lash-bar", "1") !== "0");
+
 const fit = $("fit");
 fit.value = store.get("lash-fit", "width");
 const applyFit = () => { for (const el of [video, img]) { el.classList.remove("width", "fit", "real"); el.classList.add(fit.value); } store.set("lash-fit", fit.value); };
 fit.onchange = applyFit;
 applyFit();
-$("quality").onchange = () => { store.set("lash-quality", $("quality").value); send({ t: "quality", q: Number($("quality").value) }); };
+$("quality").onchange = () => {
+  store.set("lash-quality", $("quality").value);
+  send({ t: "quality", q: Number($("quality").value) });
+  if (autoOn()) setAutoRate(autoRate, true);
+};
+$("encoder").onchange = () => { store.set("lash-encoder", $("encoder").value); send({ t: "encoder", hw: $("encoder").value === "hw" }); };
 
 $("room").value = store.get("lash-room", "");
 // 網址可帶 #房間碼/密碼 直接連線 (方便加入書籤)
