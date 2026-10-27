@@ -163,6 +163,10 @@
         <option value="fit">整個畫面</option>
         <option value="real">原始大小</option>
       </select>
+      <select id="touchMode" class="hidden" aria-label="觸控方式" title="手機遙控時怎麼移動滑鼠：絕對座標 = 點哪裡游標就到哪裡；相對座標 = 像筆電的觸控板，手指滑多少游標就移多少，點一下在游標的位置按左鍵">
+        <option value="abs">絕對座標</option>
+        <option value="rel">相對座標</option>
+      </select>
       <button class="btn hidden" id="ctl" type="button" title="遙控：滑鼠 / 觸控 / 鍵盤直接操作電腦">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4l7 17 2.5-7.5L21 11z"/></svg><span class="label">遙控</span>
       </button>
@@ -297,7 +301,7 @@ function closePeer() {
   if (e) e.close();
   setControl(false, true);
   for (const id of ["kbSheet", "clipSheet", "files"]) $(id).classList.add("hidden");
-  for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn", "quality", "encoder"]) $(id).classList.add("hidden");
+  for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn", "quality", "encoder", "touchMode"]) $(id).classList.add("hidden");
   $("note").classList.add("hidden");
   resetAuto();
 }
@@ -520,6 +524,7 @@ function onText(ch, m) {
         send({ t: "encoder", hw: $("encoder").value === "hw" });
       }
       for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn"]) $(id).classList.toggle("hidden", !m.control);
+      $("touchMode").classList.toggle("hidden", !(m.control && isTouch));
       if (m.control && store.get("lash-control", "0") === "1") setControl(true, true);
       break;
     case "pong":
@@ -614,7 +619,7 @@ function setControl(on, quiet) {
   if (!quiet) store.set("lash-control", controlOn ? "1" : "0");
   if (controlOn) {
     stage.focus({ preventScroll: true });
-    if (!quiet) toast(isTouch ? "遙控中：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動"
+    if (!quiet) toast(isTouch ? touchHelp()
                               : "遙控中：滑鼠鍵盤直接操作電腦。全螢幕時 Win、Alt+Tab 也會送過去；Ctrl + Alt + Shift 一起按 = 結束遙控", 5000);
     lockKeys();
   } else {
@@ -626,24 +631,33 @@ $("ctl").onclick = () => setControl(!controlOn);
 
 // 畫面上的位置 → 電腦螢幕上的比例 (0~1)；扣掉 object-fit 留的黑邊
 function media() { return caps && caps.video ? video : img; }
-function toRemote(e) {
+// 電腦畫面實際顯示的位置與大小 (扣掉黑邊)
+function shown() {
   const el = media(), r = el.getBoundingClientRect();
   const nw = el.videoWidth || el.naturalWidth, nh = el.videoHeight || el.naturalHeight;
   if (!nw || !nh || !r.width || !r.height) return null;
   const scale = Math.min(r.width / nw, r.height / nh);
-  const w = nw * scale, h = nh * scale, ox = (r.width - w) / 2, oy = (r.height - h) / 2;
-  const x = (e.clientX - r.left - ox) / w, y = (e.clientY - r.top - oy) / h;
-  return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)), inside: x >= 0 && x <= 1 && y >= 0 && y <= 1 };
+  const w = nw * scale, h = nh * scale;
+  return { left: r.left + (r.width - w) / 2, top: r.top + (r.height - h) / 2, w, h };
 }
+function toRemote(e) {
+  const s = shown();
+  if (!s) return null;
+  const x = (e.clientX - s.left) / s.w, y = (e.clientY - s.top) / s.h;
+  return { x: clamp01(x), y: clamp01(y), inside: x >= 0 && x <= 1 && y >= 0 && y <= 1 };
+}
+const clamp01 = v => Math.min(1, Math.max(0, v));
 
 // 滑鼠移動很頻繁：每個畫面更新 (rAF) 最多送一次最新的位置
 let pendingMove = null;
+let cursor = { x: 0.5, y: 0.5 };   // 最後送出的游標位置 (電腦螢幕上的比例)；相對座標從這裡開始移動
 function queueMove(p) {
+  cursor = { x: p.x, y: p.y };
   if (!pendingMove) requestAnimationFrame(() => { if (pendingMove) send({ t: "mm", x: pendingMove.x, y: pendingMove.y }); pendingMove = null; });
   pendingMove = p;
 }
 function flushMove() { if (pendingMove) { send({ t: "mm", x: pendingMove.x, y: pendingMove.y }); pendingMove = null; } }
-const click = (p, b = 0) => { send({ t: "md", b, x: p.x, y: p.y }); send({ t: "mu", b, x: p.x, y: p.y }); };
+const click = (p, b = 0) => { cursor = { x: p.x, y: p.y }; send({ t: "md", b, x: p.x, y: p.y }); send({ t: "mu", b, x: p.x, y: p.y }); };
 
 // --- 滑鼠 (桌機) ---
 stage.addEventListener("pointerdown", e => {
@@ -685,6 +699,30 @@ stage.addEventListener("wheel", e => {
 }, { passive: false });
 
 // --- 觸控 (手機)：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、一指滑動 = 移動游標、兩指滑動 = 捲動 ---
+// 兩種移動方式 (選單切換，會記住)：
+// - 絕對座標：點哪裡游標就到哪裡
+// - 相對座標：像筆電的觸控板，手指滑多少游標就移多少 (滑得快移得多)，點一下 / 長按都在游標目前的位置
+const touchMode = $("touchMode");
+touchMode.value = store.get("lash-touch", "abs");
+if (!touchMode.value) touchMode.value = "abs";
+const relative = () => touchMode.value === "rel";
+const touchHelp = () => relative()
+  ? "遙控中 (相對座標)：一指滑動 = 移動游標、點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動"
+  : "遙控中：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動";
+touchMode.onchange = () => { store.set("lash-touch", touchMode.value); if (controlOn) toast(touchHelp(), 5000); };
+
+// 相對座標：手指在畫面上移動 (dx, dy) → 游標移動；游標跑到看不到的地方就捲動畫面跟過去
+function moveCursor(dx, dy) {
+  const s = shown();
+  if (!s) return cursor;
+  const k = 1 + Math.min(2, Math.hypot(dx, dy) / 12);   // 加速：慢慢滑可以點得準，快速滑可以一下移很遠
+  queueMove({ x: clamp01(cursor.x + dx * k / s.w), y: clamp01(cursor.y + dy * k / s.h) });
+  const cx = s.left + cursor.x * s.w, cy = s.top + cursor.y * s.h, r = stage.getBoundingClientRect(), m = 40;
+  if (cx < r.left + m) stage.scrollLeft -= r.left + m - cx; else if (cx > r.right - m) stage.scrollLeft += cx - (r.right - m);
+  if (cy < r.top + m) stage.scrollTop -= r.top + m - cy; else if (cy > r.bottom - m) stage.scrollTop += cy - (r.bottom - m);
+  return cursor;
+}
+
 const touches = new Map();
 let gesture = null;   // { kind: "tap" | "move" | "drag" | "two" | "scroll", start, p, timer, t0, mid }
 let lastTap = null;   // 連點兩下用同一個位置，電腦才認得是雙擊
@@ -696,9 +734,9 @@ function touchDown(e) {
   e.preventDefault();
   touches.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
   if (touches.size === 1) {
-    const p = toRemote(e);
+    const p = relative() ? { ...cursor } : toRemote(e);
     if (!p) return;
-    gesture = { kind: "tap", start: { x: e.clientX, y: e.clientY }, p, t0: Date.now() };
+    gesture = { kind: "tap", start: { x: e.clientX, y: e.clientY }, last: { x: e.clientX, y: e.clientY }, p, t0: Date.now() };
     gesture.timer = setTimeout(() => {
       if (!gesture || gesture.kind !== "tap") return;
       gesture.kind = "drag";
@@ -725,13 +763,20 @@ function touchMove(e) {
     if (dy) { send({ t: "wh", dx: 0, dy }); gesture.acc -= dy; }
     return;
   }
-  const p = toRemote(e);
-  if (!p) return;
   if (gesture.kind === "tap" && Math.hypot(e.clientX - gesture.start.x, e.clientY - gesture.start.y) > 10) {
     clearTimeout(gesture.timer);
     gesture.kind = "move";
   }
-  if (gesture.kind === "move" || gesture.kind === "drag") { gesture.p = p; queueMove(p); }
+  if (gesture.kind !== "move" && gesture.kind !== "drag") return;
+  if (relative()) {
+    gesture.p = moveCursor(e.clientX - gesture.last.x, e.clientY - gesture.last.y);
+    gesture.last = { x: e.clientX, y: e.clientY };
+    return;
+  }
+  const p = toRemote(e);
+  if (!p) return;
+  gesture.p = p;
+  queueMove(p);
 }
 function touchUp(e) {
   if (!touches.delete(e.pointerId) || !gesture) return;
