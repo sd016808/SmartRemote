@@ -311,13 +311,25 @@ namespace SmartRemote.Core
                     if (encoder == null || encoder.Width != w || encoder.Height != h || encodedQuality != qi)
                     {
                         encoder?.Dispose();
-                        encoder = new H264Encoder(w, h, q.Fps, q.Bitrate);
+                        encoder = H264Encoder.Create(w, h, q.Fps, q.Bitrate);
+                        Logger.Info($"[遠端畫面] 觀看端 {Id} 用 {encoder.Name} 編碼 ({w}x{h})");
                         encodedQuality = qi;
                         keyFrameWanted = 1;
                     }
                     long now = clock.ElapsedMilliseconds, duration = Math.Max(1, now - lastStamp);
                     bool key = Interlocked.Exchange(ref keyFrameWanted, 0) == 1;
-                    byte[] au = encoder.Encode(small ?? img, key, duration * 10000);
+                    byte[] au;
+                    try { au = encoder.Encode(small ?? img, key, duration * 10000); }
+                    catch (Exception ex) when (encoder.Hardware)
+                    {
+                        // 硬體編碼器途中出錯 (驅動程式問題、顯示卡被別的程式占滿)：這次執行改用軟體編碼器，同一張重新編
+                        Logger.Warn($"[遠端畫面] 觀看端 {Id} 硬體編碼器 {encoder.Name} 失敗，改用軟體編碼器: {ex.Message}");
+                        H264Encoder.DisableHardware();
+                        encoder.Dispose();
+                        encoder = null;
+                        encoder = H264Encoder.Create(w, h, q.Fps, q.Bitrate);
+                        au = encoder.Encode(small ?? img, true, duration * 10000);
+                    }
                     if (au != null) pc.SendVideo((uint)(duration * 90), au);
                     lastStamp = now;
                 }
