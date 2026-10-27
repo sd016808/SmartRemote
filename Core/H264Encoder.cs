@@ -87,18 +87,42 @@ namespace SmartRemote.Core
         /// <summary>硬體編碼器編碼途中出錯：之後這次執行都只用軟體編碼器 (顯示卡驅動有問題時不要每次都再試)</summary>
         public static void DisableHardware() => hardwareDisabled = true;
 
-        /// <summary>建立編碼器：先試顯示卡的硬體編碼器 (可能不只一個，例如內顯 + 獨顯，照系統排的順序試)，都不行就用軟體編碼器</summary>
-        /// <param name="width">要是偶數</param>
-        public static H264Encoder Create(int width, int height, int fps, int bitrate)
+        /// <summary>這台有沒有硬體 H.264 編碼器 (第一次用到時查一次)；編碼途中出錯停用後就當作沒有</summary>
+        public static bool HasHardware => !hardwareDisabled && hardwareCount.Value > 0;
+
+        static readonly Lazy<int> hardwareCount = new(() =>
         {
-            if (!hardwareDisabled)
+            try
             {
-                Startup();
-                var input = new TypeInfo { Major = MFMediaType_Video, Sub = MFVideoFormat_NV12 };
-                var output = new TypeInfo { Major = MFMediaType_Video, Sub = MFVideoFormat_H264 };
-                IntPtr* list = null;
-                uint count = 0;
-                if (MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, 0x4 | 0x40, &input, &output, &list, &count) >= 0 && list != null) // MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER
+                IntPtr* list = EnumHardware(out uint count);
+                for (int i = 0; i < count; i++) Native.Release(ref list[i]);
+                if (list != null) CoTaskMemFree((IntPtr)list);
+                return (int)count;
+            }
+            catch (Exception) { return 0; }
+        });
+
+        // 列出硬體 H.264 編碼器 (NV12 進、H.264 出)；用完每個都要 Release，陣列要 CoTaskMemFree
+        static IntPtr* EnumHardware(out uint count)
+        {
+            Startup();
+            var input = new TypeInfo { Major = MFMediaType_Video, Sub = MFVideoFormat_NV12 };
+            var output = new TypeInfo { Major = MFMediaType_Video, Sub = MFVideoFormat_H264 };
+            IntPtr* list = null;
+            uint n = 0;
+            if (MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, 0x4 | 0x40, &input, &output, &list, &n) < 0) list = null; // MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER
+            count = list == null ? 0 : n;
+            return list;
+        }
+
+        /// <summary>建立編碼器：hardware = true 先試顯示卡的硬體編碼器 (可能不只一個，例如內顯 + 獨顯，照系統排的順序試)，都不行就用軟體編碼器</summary>
+        /// <param name="width">要是偶數</param>
+        public static H264Encoder Create(int width, int height, int fps, int bitrate, bool hardware = true)
+        {
+            if (hardware && !hardwareDisabled)
+            {
+                IntPtr* list = EnumHardware(out uint count);
+                if (list != null)
                 {
                     H264Encoder found = null;
                     for (int i = 0; i < count; i++)

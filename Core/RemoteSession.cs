@@ -38,6 +38,7 @@ namespace SmartRemote.Core
         List<Native.Monitor> monitors = Native.Monitors();
         volatile int screen = -1, quality = 1, keyFrameWanted = 1, closed;
         volatile bool forceFrame = true;
+        volatile bool wantHardware = true; // 觀看頁選的編碼器：true = 優先用顯示卡硬體編碼 (預設)，false = 軟體編碼
         DateTime? connectedAt;
         string note;
         readonly Action<string> onClipboard;
@@ -141,14 +142,7 @@ namespace SmartRemote.Core
                 if (Interlocked.Exchange(ref started, 1) == 1) return;
                 CheckSameComputer();
                 if (Control) input = new RemoteInput(Id, dryRun);
-                // 能力 (新版觀看頁看這個決定要顯示哪些功能；舊版會忽略)
-                SendJson(w =>
-                {
-                    w.WriteString("t", "caps");
-                    w.WriteNumber("v", 2);
-                    w.WriteBoolean("video", video);
-                    w.WriteBoolean("control", Control);
-                });
+                SendCaps();
                 // 螢幕清單：{"t":"screens","list":[{"i":0,"w":2560,"h":1440,"primary":true}, ...]}
                 SendJson(w =>
                 {
@@ -173,6 +167,16 @@ namespace SmartRemote.Core
             if (dc.readyState == RTCDataChannelState.open) Begin();
         }
 
+        // 能力 (新版觀看頁看這個決定要顯示哪些功能；舊版會忽略)：hw = 這台有顯示卡硬體編碼器，觀看頁才顯示硬體 / 軟體編碼的切換
+        void SendCaps() => SendJson(w =>
+        {
+            w.WriteString("t", "caps");
+            w.WriteNumber("v", 2);
+            w.WriteBoolean("video", video);
+            w.WriteBoolean("control", Control);
+            w.WriteBoolean("hw", video && H264Encoder.HasHardware);
+        });
+
         void OnMessage(JsonElement m)
         {
             string t = m.GetProperty("t").GetString();
@@ -183,6 +187,9 @@ namespace SmartRemote.Core
                     return;
                 case "quality":
                     quality = Math.Clamp(m.GetProperty("q").GetInt32(), 0, Qualities.Length - 1);
+                    return;
+                case "encoder": // 觀看頁選硬體 / 軟體編碼
+                    wantHardware = m.GetProperty("hw").GetBoolean();
                     return;
             }
             if (!Control || input == null) return; // 只能看：遙控的訊息一律不理
@@ -291,10 +298,20 @@ namespace SmartRemote.Core
             frameReady.Set();
         }
 
+        // 建立編碼器，告訴觀看頁實際用的是哪個 (選硬體但這台不能用時會是軟體)
+        H264Encoder NewEncoder(int w, int h, Quality q, bool hardware)
+        {
+            var encoder = H264Encoder.Create(w, h, q.Fps, q.Bitrate, hardware);
+            Logger.Info($"[遠端畫面] 觀看端 {Id} 用 {encoder.Name} 編碼 ({w}x{h})");
+            SendJson(wr => { wr.WriteString("t", "encoder"); wr.WriteBoolean("hw", encoder.Hardware); wr.WriteString("name", encoder.Name); });
+            return encoder;
+        }
+
         void EncodeFrames()
         {
             H264Encoder encoder = null;
             int encodedQuality = -1;
+            bool encodedHardware = true; // 建立目前編碼器時觀看頁選的 (硬體建不起來時實際上是軟體，但不要每張都重試)
             var clock = Stopwatch.StartNew();
             long lastStamp = 0;
             try
@@ -308,12 +325,14 @@ namespace SmartRemote.Core
                     Quality q = Qualities[qi];
                     (int w, int h) = VideoSize(img.Width, img.Height, q.MaxWidth);
                     using Mat small = img.Width == w && img.Height == h ? null : img.Resize(new OpenCvSharp.Size(w, h), 0, 0, InterpolationFlags.Area);
-                    if (encoder == null || encoder.Width != w || encoder.Height != h || encodedQuality != qi)
+                    bool hw = wantHardware;
+                    if (encoder == null || encoder.Width != w || encoder.Height != h || encodedQuality != qi || encodedHardware != hw)
                     {
                         encoder?.Dispose();
-                        encoder = H264Encoder.Create(w, h, q.Fps, q.Bitrate);
-                        Logger.Info($"[遠端畫面] 觀看端 {Id} 用 {encoder.Name} 編碼 ({w}x{h})");
+                        encoder = null;
+                        encoder = NewEncoder(w, h, q, hw);
                         encodedQuality = qi;
+                        encodedHardware = hw;
                         keyFrameWanted = 1;
                     }
                     long now = clock.ElapsedMilliseconds, duration = Math.Max(1, now - lastStamp);
@@ -327,7 +346,7 @@ namespace SmartRemote.Core
                         H264Encoder.DisableHardware();
                         encoder.Dispose();
                         encoder = null;
-                        encoder = H264Encoder.Create(w, h, q.Fps, q.Bitrate);
+                        encoder = NewEncoder(w, h, q, false);
                         au = encoder.Encode(small ?? img, true, duration * 10000);
                     }
                     if (au != null) pc.SendVideo((uint)(duration * 90), au);
@@ -391,7 +410,7 @@ namespace SmartRemote.Core
             Control = false;
             input?.ReleaseAll();
             RemoteLog.Write(Id, "電腦端關閉了遙控");
-            SendJson(w => { w.WriteString("t", "caps"); w.WriteNumber("v", 2); w.WriteBoolean("video", video); w.WriteBoolean("control", false); });
+            SendCaps();
         }
 
         void CheckSameComputer()

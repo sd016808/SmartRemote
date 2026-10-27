@@ -154,6 +154,10 @@
         <option value="1">標準</option>
         <option value="2">清晰</option>
       </select>
+      <select id="encoder" class="hidden" aria-label="編碼" title="電腦端怎麼壓縮畫面：硬體編碼 = 用顯示卡 (比較不吃電腦的 CPU)；軟體編碼 = 用 CPU (畫面怪怪的或延遲變大時可以試試)">
+        <option value="hw">硬體編碼</option>
+        <option value="sw">軟體編碼</option>
+      </select>
       <select id="fit" aria-label="顯示方式">
         <option value="width">填滿寬度</option>
         <option value="fit">整個畫面</option>
@@ -293,7 +297,7 @@ function closePeer() {
   if (e) e.close();
   setControl(false, true);
   for (const id of ["kbSheet", "clipSheet", "files"]) $(id).classList.add("hidden");
-  for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn", "quality"]) $(id).classList.add("hidden");
+  for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn", "quality", "encoder"]) $(id).classList.add("hidden");
   $("note").classList.add("hidden");
 }
 function loginMsg(text, bad) { $("loginMsg").textContent = text || ""; $("loginMsg").className = bad ? "bad" : ""; }
@@ -460,8 +464,19 @@ function onText(ch, m) {
       $("quality").value = store.get("lash-quality", "1");
       if (!$("quality").value) $("quality").value = "1";   // 記住的是已經沒有的選項
       send({ t: "quality", q: Number($("quality").value) });
+      // 電腦有顯示卡硬體編碼器才給選 (舊版分享端不會送 hw)
+      $("encoder").classList.toggle("hidden", !(m.video && m.hw));
+      if (m.video && m.hw) {
+        $("encoder").value = store.get("lash-encoder", "hw");
+        if (!$("encoder").value) $("encoder").value = "hw";
+        send({ t: "encoder", hw: $("encoder").value === "hw" });
+      }
       for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn"]) $(id).classList.toggle("hidden", !m.control);
       if (m.control && store.get("lash-control", "0") === "1") setControl(true, true);
+      break;
+    case "encoder":   // 電腦端實際用的編碼器
+      $("encoder").title = `目前：${m.name || (m.hw ? "硬體編碼" : "軟體編碼")}`;
+      if (!m.hw && $("encoder").value === "hw" && !$("encoder").classList.contains("hidden")) toast("電腦的硬體編碼不能用，已改用軟體編碼");
       break;
     case "note":
       $("note").textContent = m.s || "";
@@ -908,6 +923,7 @@ const applyFit = () => { for (const el of [video, img]) { el.classList.remove("w
 fit.onchange = applyFit;
 applyFit();
 $("quality").onchange = () => { store.set("lash-quality", $("quality").value); send({ t: "quality", q: Number($("quality").value) }); };
+$("encoder").onchange = () => { store.set("lash-encoder", $("encoder").value); send({ t: "encoder", hw: $("encoder").value === "hw" }); };
 
 $("room").value = store.get("lash-room", "");
 // 網址可帶 #房間碼/密碼 直接連線 (方便加入書籤)
