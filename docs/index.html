@@ -55,7 +55,16 @@
   .hint { margin:18px 0 0; padding-top:14px; border-top:1px solid var(--line); font-size:12px; color:var(--muted); }
 
   /* ===== 觀看畫面 ===== */
-  #viewer { height:100%; display:flex; flex-direction:column; }
+  #viewer { height:100%; display:flex; flex-direction:column; position:relative; }
+  /* 工具列收起來：畫面變大，上方中間留一個小把手可以展開 (放中間比較不會擋到視窗的關閉鈕、開始鈕) */
+  #viewer.collapsed .bar { display:none; }
+  #viewer.collapsed #note { top:40px; }
+  #barHandle { position:absolute; left:50%; top:0; transform:translateX(-50%); z-index:15; display:none;
+               align-items:center; gap:6px; padding:3px 14px 5px; border:1px solid var(--line); border-top:0;
+               border-radius:0 0 10px 10px; background:var(--panel); color:var(--fg); opacity:.7; cursor:pointer; }
+  #barHandle:hover, #barHandle:focus-visible { opacity:1; }
+  #viewer.collapsed #barHandle { display:inline-flex; }
+  .btn.icon { padding:5px 8px; }
   .bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 16px;
          background:var(--panel); border-bottom:1px solid var(--line); }
   .state { display:flex; align-items:center; gap:8px; flex:1; min-width:0; }
@@ -147,6 +156,9 @@
   <div class="bar">
     <div class="state"><span class="dot" id="dot"></span><span id="stateText"></span></div>
     <span id="stats"></span>
+    <button class="btn icon" id="hideBar" type="button" title="收起工具列 (畫面變大；按上方中間的小把手展開)" aria-label="收起工具列">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg>
+    </button>
     <div class="controls">
       <select id="screens" class="hidden" aria-label="螢幕"></select>
       <select id="quality" class="hidden" aria-label="畫質" title="畫質：自動 = 看網路狀況自動調整 (網路好時跟清晰一樣，塞車時自動降) / 省流量 = 寬 1280、約 2.5 Mbps / 標準 = 寬 1920、約 6 Mbps / 清晰 = 原始解析度、最高 20 Mbps (網路要很快)">
@@ -183,6 +195,10 @@
       <button class="btn danger" id="disconnect" type="button">中斷連線</button>
     </div>
   </div>
+  <button id="barHandle" type="button" title="展開工具列" aria-label="展開工具列">
+    <span class="dot" id="handleDot"></span>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+  </button>
   <div id="stage" tabindex="-1">
     <video id="video" class="media hidden" autoplay muted playsinline></video>
     <img id="screen" class="media" alt="" draggable="false">
@@ -319,7 +335,7 @@ function showLogin(text, bad) {
   document.title = "SmartRemote 遠端畫面";
 }
 function showViewer() { $("login").classList.add("hidden"); $("viewer").classList.remove("hidden"); }
-function setState(kind, text) { $("dot").className = "dot " + kind; $("stateText").textContent = text; }
+function setState(kind, text) { $("dot").className = $("handleDot").className = "dot " + kind; $("stateText").textContent = text; $("barHandle").title = `展開工具列 (${text})`; }
 function overlay(text) { $("overlay").textContent = text || ""; $("overlay").classList.toggle("hidden", !text); }
 // 連線進度：第一次連線顯示在卡片上；看畫面時斷線重連顯示在畫面上
 function progress(text) { if (everConnected) { setState("warn", text); overlay(text); } else loginMsg(text); }
@@ -584,9 +600,12 @@ setInterval(async () => {
     if (autoOn()) autoTick(tickBytes * 8);
   }
   const rtt = rttNow();
-  $("stats").textContent = `${tickFrames} 張/秒 · ${Math.round(tickBytes / 1024)} KB/s`
-    + (rtt !== null ? ` · 延遲 ${Math.round(rtt)} ms` : "")
-    + (autoOn() ? ` · 自動 ${(autoRate / 1e6).toFixed(1)} Mbps` : "");
+  // 手機寬度不夠：用短的格式，不然「已連線」會被擠掉
+  $("stats").textContent = narrow.matches
+    ? `${tickFrames} 張 · ${(tickBytes * 8 / 1e6).toFixed(1)} Mbps` + (rtt !== null ? ` · ${Math.round(rtt)} ms` : "") + (autoOn() ? " · 自動" : "")
+    : `${tickFrames} 張/秒 · ${Math.round(tickBytes / 1024)} KB/s`
+      + (rtt !== null ? ` · 延遲 ${Math.round(rtt)} ms` : "")
+      + (autoOn() ? ` · 自動 ${(autoRate / 1e6).toFixed(1)} Mbps` : "");
   tickFrames = tickBytes = 0;
   const idle = lastFrameAt ? Math.floor((Date.now() - lastFrameAt) / 1000) : 0;
   if (idle >= 5) setState("warn", `已連線，${idle} 秒沒有新畫面`);
@@ -612,6 +631,7 @@ function showScreens(ch, m) {
 
 // ===== 遙控 =====
 const isTouch = matchMedia("(pointer: coarse)").matches;
+const narrow = matchMedia("(max-width:760px)");
 function setControl(on, quiet) {
   controlOn = !!on && !!(caps && caps.control);
   stage.classList.toggle("control", controlOn);
@@ -1024,6 +1044,12 @@ if (document.fullscreenEnabled) {
     if (document.fullscreenElement) lockKeys();
   });
 } else $("full").classList.add("hidden");   // iPhone 的 Safari 不支援
+
+// 工具列收起 / 展開 (會記住)
+const setBar = open => { $("viewer").classList.toggle("collapsed", !open); store.set("lash-bar", open ? "1" : "0"); };
+$("hideBar").onclick = () => setBar(false);
+$("barHandle").onclick = () => setBar(true);
+setBar(store.get("lash-bar", "1") !== "0");
 
 const fit = $("fit");
 fit.value = store.get("lash-fit", "width");
