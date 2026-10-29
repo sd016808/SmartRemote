@@ -1,14 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- 系統匣程式：設定檔 (App/Settings)、自動更新 (App/AutoUpdater)、開機自動啟動 (App/AutoStart)、右鍵選單 (Tray)。
+       遠端畫面的引擎在 ../SmartRemote.Core (Smart Hunter 的 GUI 版也引用它) -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>SmartRemote</RootNamespace>
     <Product>SmartRemote</Product>
     <Version>1.2.0</Version>
-    <!-- 組件版本跟著 Version 走 (程式用它判斷有沒有新版) -->
+    <!-- 組件版本跟著 Version 走 (AutoUpdater 用它判斷有沒有新版) -->
     <AssemblyVersion>$(Version)</AssemblyVersion>
     <FileVersion>$(Version)</FileVersion>
     <Authors>吃泡麵度年的SD</Authors>
@@ -21,10 +24,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260427" />
-    <PackageReference Include="OpenCvSharp4.Extensions" Version="4.13.0.20260427" />
-    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260302" />
-    <PackageReference Include="SIPSorcery" Version="10.0.17" />
+    <ProjectReference Include="..\SmartRemote.Core\SmartRemote.Core.csproj" />
   </ItemGroup>
 
 </Project>

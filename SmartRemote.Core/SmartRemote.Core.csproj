@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 遠端畫面引擎 (class library)：WebRTC 連線 (RemoteView / RemoteSession)、螢幕擷取、H.264 編碼、遙控輸入、剪貼簿、傳檔案、連線紀錄。
+       系統匣程式 (../SmartRemote) 與 Smart Hunter 的 GUI 版 (內建「協助模式」) 都引用這個專案；Native AOT 發佈時整個編進各自的 exe。
+       設定檔、自動更新、開機自動啟動是系統匣程式自己的事，不在這裡 -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>SmartRemote.Core</RootNamespace>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 系統匣程式與 Smart Hunter GUI 可以用 internal 的型別 (Win32 對話框等) -->
+    <InternalsVisibleTo Include="SmartRemote" />
+    <InternalsVisibleTo Include="LostArkSmartHunter.Gui" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260427" />
+    <PackageReference Include="OpenCvSharp4.Extensions" Version="4.13.0.20260427" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260302" />
+    <PackageReference Include="SIPSorcery" Version="10.0.17" />
+  </ItemGroup>
+
+</Project>

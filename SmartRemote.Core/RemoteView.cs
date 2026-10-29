@@ -31,6 +31,7 @@ namespace SmartRemote.Core
         static volatile bool allowControl;
         static bool dryRun;
         static volatile bool paused;
+        static CancellationTokenSource listenCts;   // 有值 = 正在等觀看端；Stop 取消它
         static readonly List<RemoteSession> sessions = new();
 
         /// <summary>連線數、暫停、遙控開關等狀態改變時觸發 (介面據此更新)</summary>
@@ -38,6 +39,8 @@ namespace SmartRemote.Core
 
         public static bool Paused => paused;
         public static bool AllowControl => allowControl;
+        /// <summary>Start 過且還沒 Stop</summary>
+        public static bool IsRunning => listenCts != null;
         public static int Connections { get { lock (sessions) return sessions.Count(s => s.Connected); } }
 
         /// <summary>隨機產生的房間碼 / 密碼 (設定檔沒填時用)</summary>
@@ -49,13 +52,35 @@ namespace SmartRemote.Core
         /// </summary>
         public static void Start(string room, string password, bool control, bool dryRun = false)
         {
+            Stop();   // 再 Start 一次 (換房間碼) 先把舊的收掉
             topic = "lash-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("lash-topic:" + room))).ToLowerInvariant()[..24];
             key = SHA256.HashData(Encoding.UTF8.GetBytes("lash-key:" + room + ":" + password));
             allowControl = control;
             RemoteView.dryRun = dryRun;
             RemoteClipboard.DryRun = dryRun;
+            paused = false;
+            var cts = new CancellationTokenSource();
+            listenCts = cts;
             Logger.Info($"[遠端畫面] 開始等待觀看端 (房間碼 {room}，{(control ? "可遙控" : "只能看")})");
-            _ = Task.Run(Listen);
+            _ = Task.Run(() => Listen(cts.Token));
+            StateChanged?.Invoke();
+        }
+
+        /// <summary>
+        /// 停止等待觀看端並中斷所有連線 (Smart Hunter 的「協助模式」結束時用；系統匣程式是整個程式關掉所以不用)。
+        /// 沒 Start 過或已經 Stop 就什麼都不做
+        /// </summary>
+        public static void Stop(string reason = "電腦端結束了遠端畫面")
+        {
+            CancellationTokenSource cts = listenCts;
+            if (cts == null) return;
+            listenCts = null;
+            cts.Cancel();
+            List<RemoteSession> all;
+            lock (sessions) all = sessions.ToList();
+            foreach (var s in all) s.Close(reason, bye: reason);
+            Logger.Info("[遠端畫面] 停止等待觀看端，已中斷所有連線");
+            StateChanged?.Invoke();
         }
 
         /// <summary>本機一鍵中斷 (系統匣選單)：中斷所有觀看端並暫停接受新連線，再按一次恢復。回傳 true = 現在是暫停中</summary>
@@ -91,6 +116,7 @@ namespace SmartRemote.Core
         {
             get
             {
+                if (!IsRunning) return "未啟動";
                 if (paused) return "暫停接受連線";
                 int n, control;
                 lock (sessions) { n = sessions.Count(s => s.Connected); control = sessions.Count(s => s.Connected && s.Control); }
@@ -107,18 +133,18 @@ namespace SmartRemote.Core
             StateChanged?.Invoke();
         }
 
-        // 訂閱 ntfy (串流 JSON，一行一則)；斷線就重連
-        static async Task Listen()
+        // 訂閱 ntfy (串流 JSON，一行一則)；斷線就重連，Stop 取消 token 就結束
+        static async Task Listen(CancellationToken ct)
         {
-            while (true)
+            while (!ct.IsCancellationRequested)
             {
                 try
                 {
-                    using var resp = await http.GetAsync($"{Ntfy}/{topic}/json", HttpCompletionOption.ResponseHeadersRead);
+                    using var resp = await http.GetAsync($"{Ntfy}/{topic}/json", HttpCompletionOption.ResponseHeadersRead, ct);
                     resp.EnsureSuccessStatusCode();
-                    using var reader = new StreamReader(await resp.Content.ReadAsStreamAsync());
+                    using var reader = new StreamReader(await resp.Content.ReadAsStreamAsync(ct));
                     string line;
-                    while ((line = await reader.ReadLineAsync()) != null)
+                    while ((line = await reader.ReadLineAsync(ct)) != null)
                     {
                         using var doc = JsonDocument.Parse(line);
                         if (doc.RootElement.GetProperty("event").GetString() != "message") continue;
@@ -126,8 +152,9 @@ namespace SmartRemote.Core
                         _ = Task.Run(() => HandleMessage(msg));
                     }
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
                 catch (Exception ex) { Logger.Warn($"[遠端畫面] ntfy 連線中斷，10 秒後重連: {ex.Message}"); }
-                await Task.Delay(10000);
+                try { await Task.Delay(10000, ct); } catch (OperationCanceledException) { return; }
             }
         }
 
@@ -149,6 +176,7 @@ namespace SmartRemote.Core
             catch { return; }   // 解不開 = 密碼不對 / 不是觀看端的訊息 (自己送出的回覆也會收到)
             Logger.Info($"[遠端畫面] 觀看端 {id} 要求連線 ({ua ?? "舊版觀看頁"})");
             RemoteLog.Write(id, $"要求連線  來源 {RemoteLog.OfferSource(sdp)}  裝置 {RemoteLog.Device(ua)}");
+            if (!IsRunning) return;   // Stop 之後才收到的舊訊息
             if (paused)
             {
                 RemoteLog.Write(id, "拒絕 (電腦端暫停接受連線)");

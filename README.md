@@ -80,8 +80,8 @@
 需要 .NET 8 SDK。
 
 ```powershell
-dotnet build -c Release
-dotnet publish -c Release -r win-x64 --self-contained true -o publish
+dotnet build SmartRemote -c Release
+dotnet publish SmartRemote -c Release -r win-x64 --self-contained true -o publish
 ```
 
 開發時可以設環境變數 `SMARTREMOTE_DRYRUN=1`：遙控的滑鼠、鍵盤、剪貼簿只寫日誌，不真的動作（測試用）。
