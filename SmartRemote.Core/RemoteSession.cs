@@ -275,6 +275,17 @@ namespace SmartRemote.Core
         Mat pending;
         readonly AutoResetEvent frameReady = new(false);
 
+        // 畫面幾乎沒在動 (1 秒內變化不超過 LowActivityMaxPerSec 次，例如只有游標閃、時鐘跳) 就送全解析度、高品質的 JPEG 當清晰圖：
+        // H.264 碼率有限，畫面慢下來時小字會糊 (使用者 2026-11-01 要求，做法仿 Chrome 遠端桌面：動作停了就補清晰的)。
+        // 低活動持續 StillAfterMs 才開始送，之後有變化就再送新的 (兩張至少隔 StillMinIntervalMs)；0.5 秒內變 MotionBurst 次 = 真的在動，拿掉。
+        // 新版觀看頁疊在影像上面 (先送 {t:still,f} 再送 JPEG 切塊，畫面編號最高位元是 1)，收到 {t:motion} 拿掉；
+        // 舊版 JPEG 觀看頁就直接送清晰的當作普通畫面，低活動期間每秒補送的普通畫質那張不送 (免得蓋掉)
+        const int StillAfterMs = 1000, StillMinIntervalMs = 1500, StillJpegQuality = 90, LowActivityMaxPerSec = 2, MotionBurst = 3;
+        readonly Queue<long> changeTimes = new();
+        long lowSince = -1, lastStillAt = -100000;
+        bool stillSent, dirtySinceStill = true;
+        uint stillFrame;
+
         void SendFrames()
         {
             Native.UsePerMonitorDpi();
@@ -310,6 +321,30 @@ namespace SmartRemote.Core
                         note = capture.Problem ?? baseNote;
                         SendJson(w => { w.WriteString("t", "note"); if (note == null) w.WriteNull("s"); else w.WriteString("s", note); });
                     }
+                    bool changed = img != null && capture.LastChanged;
+                    long now = clock.ElapsedMilliseconds;
+                    if (changed) { changeTimes.Enqueue(now); dirtySinceStill = true; }
+                    while (changeTimes.Count > 0 && now - changeTimes.Peek() > 1000) changeTimes.Dequeue();
+                    bool low = changeTimes.Count <= LowActivityMaxPerSec;
+                    if (!low) lowSince = -1; else if (lowSince < 0) lowSince = now;
+                    if (stillSent && changeTimes.Count(t => now - t <= 500) >= MotionBurst)
+                    {
+                        stillSent = false;   // 真的在動了：觀看頁拿掉清晰圖，回到影像
+                        if (video) SendJson(w => w.WriteString("t", "motion"));
+                    }
+                    bool sentStill = false;
+                    if (low && lowSince >= 0 && now - lowSince >= StillAfterMs && dirtySinceStill && now - lastStillAt >= StillMinIntervalMs && main.bufferedAmount < 4 * 1024 * 1024)
+                    {
+                        using Mat grabbed = img == null ? capture.Grab(50, true) : null;
+                        Mat src = img ?? grabbed;
+                        if (src != null)
+                        {
+                            SendStill(src, video ? 0x80000000u | stillFrame++ : jpegFrame++);
+                            stillSent = sentStill = true;
+                            dirtySinceStill = false;
+                            lastStillAt = now;
+                        }
+                    }
                     if (img == null) continue;
                     forceFrame = false;
                     lastQuality = quality;
@@ -325,7 +360,8 @@ namespace SmartRemote.Core
                     {
                         (int w, int h) = VideoSize(img.Width, img.Height, q.MaxWidth);
                         using Mat small = img.Width == w && img.Height == h ? img.Clone() : img.Resize(new OpenCvSharp.Size(w, h), 0, 0, InterpolationFlags.Area);
-                        // 還沒送完的太多 (網路慢) 就跳過這張
+                        // 還沒送完的太多 (網路慢) 就跳過這張；低活動期間清晰的那張送過了就不要再用普通畫質蓋掉 (這一輪剛送清晰的也不用再送)
+                        if (sentStill || (stillSent && !changed)) continue;
                         if (main.bufferedAmount < 2 * 1024 * 1024) SendJpeg(small, q.JpegQuality, jpegFrame++);
                     }
                 }
@@ -419,6 +455,12 @@ namespace SmartRemote.Core
 
         // JPEG 切塊：標頭 = 畫面編號 u32、第幾塊 u16、共幾塊 u16 (little endian) + 片段
         const int ChunkBytes = 16000;
+
+        void SendStill(Mat bgra, uint frame)
+        {
+            if (video) SendJson(w => { w.WriteString("t", "still"); w.WriteNumber("f", frame); });
+            SendJpeg(bgra, StillJpegQuality, frame);
+        }
 
         void SendJpeg(Mat bgra, int jpegQuality, uint frame)
         {
