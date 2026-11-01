@@ -32,8 +32,6 @@ namespace SmartRemote.Core
         public string Problem { get; private set; }
 
         public bool UsingGdi => useGdi;
-        /// <summary>上一次 Grab 畫面有沒有變 (Desktop Duplication 才知道；GDI 一律當作有變)。靜止時送清晰圖用</summary>
-        public bool LastChanged { get; private set; } = true;
 
         public ScreenCapture(Native.Monitor monitor)
         {
@@ -60,7 +58,6 @@ namespace SmartRemote.Core
         /// </summary>
         public Mat Grab(int timeoutMs, bool force)
         {
-            LastChanged = true;
             if (useGdi)
             {
                 Thread.Sleep(timeoutMs);
@@ -94,7 +91,6 @@ namespace SmartRemote.Core
                 nextRetryAt = 0;
                 return force ? Compose() : null;
             }
-            LastChanged = changed;
             return changed || force ? Compose() : null;
         }
 
