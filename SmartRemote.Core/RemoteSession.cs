@@ -456,14 +456,10 @@ namespace SmartRemote.Core
         // JPEG 切塊：標頭 = 畫面編號 u32、第幾塊 u16、共幾塊 u16 (little endian) + 片段
         const int ChunkBytes = 16000;
 
-        // 清晰圖的大小跟著目前的畫質等級走：網路差 (自動畫質降到低檔、或選省流量) 時送串流解析度的 (幾百 KB)，網路好才送原始解析度 (1~2 MB)，
-        // 免得一張圖要傳好幾秒還跟影片搶頻寬
         void SendStill(Mat bgra, uint frame)
         {
-            (int w, int h) = VideoSize(bgra.Width, bgra.Height, CurrentQuality(quality).MaxWidth);
-            using Mat sized = bgra.Width == w && bgra.Height == h ? null : bgra.Resize(new OpenCvSharp.Size(w, h), 0, 0, InterpolationFlags.Area);
-            if (video) SendJson(w2 => { w2.WriteString("t", "still"); w2.WriteNumber("f", frame); });
-            SendJpeg(sized ?? bgra, StillJpegQuality, frame);
+            if (video) SendJson(w => { w.WriteString("t", "still"); w.WriteNumber("f", frame); });
+            SendJpeg(bgra, StillJpegQuality, frame);
         }
 
         void SendJpeg(Mat bgra, int jpegQuality, uint frame)
