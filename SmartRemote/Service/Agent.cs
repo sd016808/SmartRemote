@@ -1,3 +1,4 @@
+using SmartRemote.App;
 using SmartRemote.Core;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -62,8 +63,8 @@ namespace SmartRemote.Service
             try { settings = Settings.Load(); }
             catch (FormatException ex) { Logger.Warn(ex.Message); return 2; }
 
-            room = settings.Room != "" ? settings.Room : room ?? RemoteView.RandomCode(8);
-            password = settings.Password != "" ? settings.Password : password ?? RemoteView.RandomCode(10);
+            room = settings.Room != "" ? settings.Room : room ?? Settings.RandomRoom();
+            password = settings.Password != "" ? settings.Password : password ?? Settings.RandomPassword();
             RemoteFiles.CommonFolders = ConsoleUserFolders;
 
             AgentPipe.StartServer(room, password);

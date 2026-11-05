@@ -1,3 +1,4 @@
+using SmartRemote.App;
 using SmartRemote.Core;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;

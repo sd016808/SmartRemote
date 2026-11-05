@@ -81,15 +81,6 @@ namespace SmartRemote.Core
             return true;
         }
 
-        /// <summary>目前接收輸入的桌面名稱 (Default = 一般桌面、Winlogon = 安全桌面)；沒權限查回傳 null</summary>
-        public static string InputDesktopName()
-        {
-            IntPtr input = OpenInputDesktop(0, false, MAXIMUM_ALLOWED);
-            if (input == IntPtr.Zero) return null;
-            try { return DesktopName(input); }
-            finally { CloseDesktop(input); }
-        }
-
         static string DesktopName(IntPtr desktop)
         {
             if (desktop == IntPtr.Zero) return null;

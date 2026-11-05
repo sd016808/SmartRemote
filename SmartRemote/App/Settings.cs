@@ -1,7 +1,8 @@
+using SmartRemote.Core;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace SmartRemote.Core
+namespace SmartRemote.App
 {
     /// <summary>
     /// 設定檔 settings.json (跟 exe 放在同一層)：
@@ -17,6 +18,10 @@ namespace SmartRemote.Core
         [JsonPropertyName("autoStart")] public bool AutoStart { get; set; }
 
         public static string FilePath => AppPaths.InBaseDir("settings.json");
+
+        /// <summary>設定檔沒填房間碼 / 密碼時用的隨機碼</summary>
+        public static string RandomRoom() => RemoteView.RandomCode(8);
+        public static string RandomPassword() => RemoteView.RandomCode(10);
 
         const string Example = """
             {

@@ -1,3 +1,4 @@
+using SmartRemote.App;
 using SmartRemote.Core;
 using System.Diagnostics;
 using System.Runtime.InteropServices;

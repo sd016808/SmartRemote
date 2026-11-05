@@ -1,3 +1,4 @@
+using SmartRemote.App;
 using SmartRemote.Core;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -93,7 +94,7 @@ namespace SmartRemote.Service
         static void Supervise()
         {
             // 設定檔沒填房間碼 / 密碼時用的隨機碼：服務這次執行期間固定 (遠端程式重開、換人登入都不會變，觀看端才連得回來)
-            string codes = RemoteView.Json(w => { w.WriteString("room", RemoteView.RandomCode(8)); w.WriteString("password", RemoteView.RandomCode(10)); });
+            string codes = RemoteView.Json(w => { w.WriteString("room", Settings.RandomRoom()); w.WriteString("password", Settings.RandomPassword()); });
             AgentProcess agent = null;
             int failures = 0;
             long retryAt = 0;

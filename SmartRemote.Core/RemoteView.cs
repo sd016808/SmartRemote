@@ -192,7 +192,7 @@ namespace SmartRemote.Core
                 lock (sessions) sessions.Add(session);
                 var gathered = new TaskCompletionSource();
                 pc.onicegatheringstatechange += s => { if (s == RTCIceGatheringState.complete) gathered.TrySetResult(); };
-                session.AddVideoTrack(sdp);
+                session.Video.AddTrack(sdp);
                 var result = pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.offer, sdp = sdp });
                 if (result != SetDescriptionResultEnum.OK) { Logger.Warn($"[遠端畫面] 觀看端 {id} 的連線碼無效: {result}"); session.Close($"連線碼無效 {result}"); return; }
                 // 一定要等位址收集完 (STUN 查到外網位址) 才建立回覆：回覆裡的位址在 createAnswer 當下就固定了。
@@ -200,8 +200,8 @@ namespace SmartRemote.Core
                 if (pc.iceGatheringState != RTCIceGatheringState.complete) await Task.WhenAny(gathered.Task, Task.Delay(5000));
                 await pc.setLocalDescription(pc.createAnswer(null));
                 string sdpOut = pc.localDescription.sdp.ToString();
-                session.CheckAnswer(sdpOut);
-                sdpOut = session.AddPlayoutDelay(sdpOut);
+                session.Video.CheckAnswer(sdpOut);
+                sdpOut = session.Video.AddPlayoutDelay(sdpOut);
                 if (!sdpOut.Contains(" typ srflx")) Logger.Warn($"[遠端畫面] 觀看端 {id}：查不到外網位址 (STUN 沒回應)，只有同一個區網連得上");
                 await Publish(Encrypt(Json(w =>
                 {

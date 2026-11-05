@@ -1,3 +1,4 @@
+using SmartRemote.App;
 using SmartRemote.Core;
 using SmartRemote.Service;
 using System.Text.Json;
@@ -37,8 +38,8 @@ namespace SmartRemote.Tray
 
         public LocalEngine(Settings settings)
         {
-            Room = settings.Room != "" ? settings.Room : RemoteView.RandomCode(8);
-            Password = settings.Password != "" ? settings.Password : RemoteView.RandomCode(10);
+            Room = settings.Room != "" ? settings.Room : Settings.RandomRoom();
+            Password = settings.Password != "" ? settings.Password : Settings.RandomPassword();
             // SMARTREMOTE_DRYRUN=1 只給測試用：遙控的輸入與剪貼簿只寫日誌，不真的動滑鼠鍵盤
             RemoteView.Start(Room, Password, settings.Control, Environment.GetEnvironmentVariable("SMARTREMOTE_DRYRUN") == "1");
             Logger.Info($"SmartRemote 啟動：房間碼 {Room}，{(settings.Control ? "可遙控" : "只能看")}");

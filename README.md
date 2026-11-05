@@ -103,6 +103,22 @@ dotnet publish SmartRemote -c Release -r win-x64 --self-contained true -o publis
 
 開發時可以設環境變數 `SMARTREMOTE_DRYRUN=1`：遙控的滑鼠、鍵盤、剪貼簿只寫日誌，不真的動作（測試用）。
 
+## 程式架構
+
+- `SmartRemote.Core/`（函式庫；Smart Hunter 的「協助模式」也用它）
+  - `RemoteView.cs`：等觀看端（ntfy 交換連線碼）、管理所有連線
+  - `RemoteSession.cs`：一個觀看端的連線（控制訊息、畫質、截圖 → 編碼的流程）
+  - `VideoSender.cs`：H.264 影像軌（協商、RTP 封包、掉封包重送、關鍵畫格要求）
+  - `ScreenCapture.cs`：觀看端拿畫面的地方；同一個螢幕所有觀看端共用一份（`CaptureSource`）
+  - `DesktopCapturer.cs`：真正去截圖（DXGI Desktop Duplication，不行就 GDI；跟著切到安全桌面）
+  - `H264Encoder.cs`、`FramePool.cs`、`RemoteInput.cs`、`RemoteClipboard.cs`、`RemoteFiles.cs`、`RemoteLog.cs`、`Native.cs`
+- `SmartRemote/`（系統匣程式）
+  - `App/`：設定檔、更新、開機自動啟動
+  - `Tray/`：系統匣介面；`TrayEngine.cs` 分一般模式（自己連線）與服務模式（透過管道控制遠端程式）
+  - `Service/`：系統服務模式。`ServiceHost`（`--service`）顧著 `Agent`（`--agent`，SYSTEM 權限的遠端程式），
+    `AgentPipe` 是遠端程式與系統匣之間的管道，`ServiceSetup` 負責安裝 / 移除
+- `docs/index.html`：觀看頁（GitHub Pages）
+
 ## 協定
 
-觀看頁與程式之間的協定（連線碼交換用 ntfy 的主題與 AES-GCM 加密、畫面與遙控走 WebRTC DataChannel）寫在 `Core/RemoteView.cs`、`Core/RemoteSession.cs`，觀看頁在 `docs/index.html`。改協定時兩邊要一起改。
+觀看頁與程式之間的協定（連線碼交換用 ntfy 的主題與 AES-GCM 加密、畫面與遙控走 WebRTC DataChannel）寫在 `SmartRemote.Core/RemoteView.cs`、`RemoteSession.cs`（影像軌在 `VideoSender.cs`），觀看頁在 `docs/index.html`。改協定時兩邊要一起改。

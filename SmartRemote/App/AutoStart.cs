@@ -1,8 +1,9 @@
+using SmartRemote.Core;
 using System.Diagnostics;
 using System.Security;
 using System.Security.Principal;
 
-namespace SmartRemote.Core
+namespace SmartRemote.App
 {
     /// <summary>
     /// 開機自動啟動 (使用者要求，設定檔 autoStart，預設不啟動)。程式要系統管理員權限才能控制鍵鼠，

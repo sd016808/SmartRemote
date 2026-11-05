@@ -1,3 +1,4 @@
+using SmartRemote.Core;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Net.Http.Headers;
@@ -5,7 +6,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace SmartRemote.Core
+namespace SmartRemote.App
 {
     /// <summary>
     /// 更新：從公開的 GitHub Release (sd016808/SmartRemote) 查最新版，比目前新就下載 zip、換上新檔、重新啟動。

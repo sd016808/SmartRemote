@@ -1,3 +1,4 @@
+using SmartRemote.App;
 using SmartRemote.Core;
 using SmartRemote.Service;
 using SmartRemote.Tray;
