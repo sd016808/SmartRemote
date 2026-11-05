@@ -84,10 +84,12 @@ namespace SmartRemote.Core
                 }
                 OnMainChannel(dc);
             };
-            // 瀏覽器掉封包解不出畫面時會要求關鍵畫格 (PLI / FIR)
+            // 瀏覽器掉封包解不出畫面時會要求關鍵畫格 (PLI / FIR)。
+            // 只認這兩種：PSFB 還有 REMB (瀏覽器每 0.2 秒回報一次頻寬)，當成要求的話每秒會白送 5 張關鍵畫格
             pc.OnReceiveReport += (_, media, report) =>
             {
-                if (media == SDPMediaTypesEnum.video && report.Feedback?.Header.PacketType == RTCPReportTypesEnum.PSFB) keyFrameWanted = 1;
+                if (media == SDPMediaTypesEnum.video && report.Feedback?.Header is { PacketType: RTCPReportTypesEnum.PSFB, PayloadFeedbackMessageType: PSFBFeedbackTypesEnum.PLI or PSFBFeedbackTypesEnum.FIR })
+                    keyFrameWanted = 1;
             };
         }
 
@@ -105,12 +107,43 @@ namespace SmartRemote.Core
                 string line = raw.Trim();
                 if (line.StartsWith("a=rtpmap:") && line.Contains(" H264/90000")) rtpmap[int.Parse(line[9..line.IndexOf(' ')])] = line;
                 else if (line.StartsWith("a=fmtp:") && int.TryParse(line[7..line.IndexOf(' ')], out int pt)) fmtp[pt] = line[(line.IndexOf(' ') + 1)..];
+                else if (line.StartsWith("a=extmap:") && line.EndsWith(" " + PlayoutDelayUri) && int.TryParse(line[9..line.IndexOf(' ')], out int id)) playoutDelayId = id;
             }
             var candidates = rtpmap.Keys.Where(pt => fmtp.TryGetValue(pt, out string f) && f.Contains("packetization-mode=1") && f.Contains("profile-level-id=42")).ToList();
             if (candidates.Count == 0) return;
             int best = candidates.OrderBy(pt => fmtp[pt].Contains("profile-level-id=42e0") ? 0 : 1).First();
             pc.addTrack(new MediaStreamTrack(new VideoFormat(VideoCodecsEnum.H264, best, 90000, fmtp[best]), MediaStreamStatusEnum.SendOnly));
             video = true;
+            videoPayloadType = best;
+        }
+
+        // playout-delay 擴充 (min = max = 0)：告訴瀏覽器「解完碼馬上顯示」。
+        // 沒有的話 Chrome 會照畫格的節奏排顯示時間 (平滑播放)：連續在動時多等 20 ms 左右，
+        // 畫面偶爾才變一下時 (打字、點一下) 常常排錯，壓住最多一整個間隔 (實測到 700 ms) 才顯示
+        const string PlayoutDelayUri = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
+        int playoutDelayId; // 觀看端的連線碼裡這個擴充的編號 (0 = 瀏覽器不支援)
+
+        sealed class PlayoutDelayExtension : RTPHeaderExtension
+        {
+            public PlayoutDelayExtension(int id) : base(id, PlayoutDelayUri, 3, RTPHeaderExtensionType.OneByte, SDPMediaTypesEnum.video) { }
+            public override void Set(object obj) { }
+            public override byte[] Marshal() => new byte[] { (byte)((Id << 4) | 2), 0, 0, 0 }; // 編號 + 長度，min 12 位元、max 12 位元都是 0
+            public override object Unmarshal(RTPHeader header, byte[] data) => null;
+        }
+
+        /// <summary>
+        /// 回覆的連線碼加上 playout-delay 擴充，之後送出的影像封包都帶著它；要在 CheckAnswer 之後呼叫。
+        /// SIPSorcery 不認得這個擴充、不會自己寫進回覆，所以直接改回覆的文字 (觀看端有提出才加，編號用它的)
+        /// </summary>
+        public string AddPlayoutDelay(string answerSdp)
+        {
+            if (!video || playoutDelayId < 1 || playoutDelayId > 14) return answerSdp; // 1 ~ 14 才能用單位元組的擴充標頭
+            int m = answerSdp.IndexOf("m=video", StringComparison.Ordinal);
+            int a = m < 0 ? -1 : answerSdp.IndexOf("\na=", m, StringComparison.Ordinal);
+            int end = a < 0 ? -1 : answerSdp.IndexOf('\n', a + 1);
+            if (end < 0) return answerSdp;
+            pc.VideoStream.LocalTrack.HeaderExtensions[playoutDelayId] = new PlayoutDelayExtension(playoutDelayId);
+            return answerSdp.Insert(end + 1, $"a=extmap:{playoutDelayId} {PlayoutDelayUri}\r\n");
         }
 
         /// <summary>回覆建立好之後確認影像軌有沒有真的協商成功 (回覆裡影像是 sendonly)</summary>
@@ -393,7 +426,7 @@ namespace SmartRemote.Core
                         encoder = NewEncoder(w, h, q, false);
                         au = encoder.Encode(small ?? img, true, duration * 10000);
                     }
-                    if (au != null) pc.SendVideo((uint)(duration * 90), au);
+                    if (au != null) SendH264(au, (uint)(clock.ElapsedTicks * 90000 / Stopwatch.Frequency));
                     lastStamp = now;
                 }
             }
@@ -406,6 +439,40 @@ namespace SmartRemote.Core
             {
                 encoder?.Dispose();
                 Interlocked.Exchange(ref pending, null)?.Dispose();
+            }
+        }
+
+        // 一張 H.264 畫面 (Annex B) 切成 RTP 封包送出，時間戳記 (90 kHz) 自己給 = 送出的時間。
+        // 不用 pc.SendVideo：它的戳記是「送完這張才加上這張的長度」，等於每張都蓋上一張的時間。畫面一直在動時沒差；
+        // 靜止 (每秒 1 張) 後開始動，戳記會比實際早將近 1 秒，瀏覽器以為畫面來早了就壓著晚點才顯示 (實測多 100 ms 左右)
+        int videoPayloadType;
+        const int RtpPayloadBytes = 1200;
+        const string TransportCcUri = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
+
+        void SendH264(byte[] au, uint timestamp)
+        {
+            var stream = pc.VideoStream;
+            foreach (var item in H264Packetiser.ParseNals(au))
+            {
+                byte[] nal = item.NAL;
+                if (nal.Length <= RtpPayloadBytes)
+                {
+                    stream.SetRtpHeaderExtensionValue(TransportCcUri, null); // 有協商到才會帶 (封包序號加一)，跟 SendVideo 一樣
+                    stream.SendRtpRaw(nal, timestamp, item.IsLast ? 1 : 0, videoPayloadType);
+                    continue;
+                }
+                // 一個封包放不下：切成 FU-A (第一個位元組是 NAL 標頭，不送，改放在每塊的 FU 標頭裡)
+                for (int offset = 1; offset < nal.Length; offset += RtpPayloadBytes)
+                {
+                    int len = Math.Min(RtpPayloadBytes, nal.Length - offset);
+                    bool last = offset + len >= nal.Length;
+                    byte[] header = H264Packetiser.GetH264RtpHeader(nal[0], offset == 1, last);
+                    var packet = new byte[header.Length + len];
+                    Buffer.BlockCopy(header, 0, packet, 0, header.Length);
+                    Buffer.BlockCopy(nal, offset, packet, header.Length, len);
+                    stream.SetRtpHeaderExtensionValue(TransportCcUri, null);
+                    stream.SendRtpRaw(packet, timestamp, item.IsLast && last ? 1 : 0, videoPayloadType);
+                }
             }
         }
 

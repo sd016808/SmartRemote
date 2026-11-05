@@ -10,7 +10,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>SmartRemote</RootNamespace>
     <Product>SmartRemote</Product>
-    <Version>1.3.1</Version>
+    <Version>1.3.2</Version>
     <!-- 組件版本跟著 Version 走 (AutoUpdater 用它判斷有沒有新版) -->
     <AssemblyVersion>$(Version)</AssemblyVersion>
     <FileVersion>$(Version)</FileVersion>

@@ -201,6 +201,7 @@ namespace SmartRemote.Core
                 await pc.setLocalDescription(pc.createAnswer(null));
                 string sdpOut = pc.localDescription.sdp.ToString();
                 session.CheckAnswer(sdpOut);
+                sdpOut = session.AddPlayoutDelay(sdpOut);
                 if (!sdpOut.Contains(" typ srflx")) Logger.Warn($"[遠端畫面] 觀看端 {id}：查不到外網位址 (STUN 沒回應)，只有同一個區網連得上");
                 await Publish(Encrypt(Json(w =>
                 {
