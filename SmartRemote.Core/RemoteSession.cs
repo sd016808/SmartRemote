@@ -512,26 +512,39 @@ namespace SmartRemote.Core
             }
         }
 
-        void Resend(ushort seq)
+        // 回傳 false = 這個封包沒辦法重送 (呼叫端改送關鍵畫格)
+        bool Resend(ushort seq)
         {
             lock (sendLock)
             {
                 ref var p = ref sent[seq & (SentSize - 1)];
                 // 序號繞一圈 (65535 → 0) 之前的不重送：SIPSorcery 加密用的圈數是照「送出 65535 就加一」算的，
                 // 重送上一圈的會用錯圈數 (對方解不開)，重送 65535 本身還會讓圈數多加一次、之後全部解不開
-                if (p.Payload == null || p.Seq != seq || seq > lastSeq || seq == ushort.MaxValue) return;
+                if (p.Payload == null || p.Seq != seq || seq > lastSeq || seq == ushort.MaxValue) return false;
                 long now = Environment.TickCount64;
-                if (now - p.ResentAt < 10) return; // 剛重送過 (同一個要求重複收到)
+                if (now - p.ResentAt < 10) return true; // 剛重送過 (同一個要求重複收到)
+
+                // 重送的量有上限：流量的 1/4，最多存 0.5 秒的份。網路塞住時會一次掉一大堆，全部重送只會更塞、永遠清不掉 (實測會卡好幾秒)；
+                // 超過就不重送了，改成送一張關鍵畫格重新開始
+                int rate = CurrentQuality(quality).Bitrate / 8 / 4; // 每秒可以重送幾 bytes
+                resendBudget = Math.Min(rate / 2, resendBudget + (now - resendBudgetAt) * rate / 1000);
+                resendBudgetAt = now;
+                if (resendBudget < p.Payload.Length) { WantKeyFrame(1000); return true; }
+                resendBudget -= p.Payload.Length;
+
                 p.ResentAt = now;
                 pc.VideoStream.SendRtpRaw(p.Payload, p.Timestamp, p.Marker, videoPayloadType, seq);
+                return true;
             }
         }
 
-        // 關鍵畫格很大，要求太密的話只會塞得更嚴重：最少隔 0.3 秒
-        void WantKeyFrame()
+        long resendBudget, resendBudgetAt;
+
+        // 關鍵畫格很大，要求太密的話只會塞得更嚴重：最少隔 0.3 秒 (重送不完改送關鍵畫格的隔 1 秒)
+        void WantKeyFrame(int minGapMs = 300)
         {
             long now = Environment.TickCount64;
-            if (now - Interlocked.Read(ref keyFrameAt) < 300) return;
+            if (now - Interlocked.Read(ref keyFrameAt) < minGapMs) return;
             Interlocked.Exchange(ref keyFrameAt, now);
             keyFrameWanted = 1;
         }
@@ -576,13 +589,16 @@ namespace SmartRemote.Core
                 if (type == 206 && (format == 1 || format == 4)) WantKeyFrame(); // PSFB：PLI / FIR
                 else if (type == 205 && format == 1) // RTPFB：NACK，每筆 = 掉的序號 + 後面 16 個哪些也掉了
                 {
+                    bool all = true;
                     for (int j = i + 12; j + 4 <= i + size; j += 4)
                     {
                         int first = (b[j] << 8) | b[j + 1], mask = (b[j + 2] << 8) | b[j + 3];
-                        Resend((ushort)first);
+                        all &= Resend((ushort)first);
                         for (int k = 0; k < 16; k++)
-                            if ((mask >> k & 1) != 0) Resend((ushort)(first + k + 1));
+                            if ((mask >> k & 1) != 0) all &= Resend((ushort)(first + k + 1));
                     }
+                    // 有重送不了的 (太舊、序號剛繞一圈)：瀏覽器會一直等到 3 秒逾時才自己要求關鍵畫格，畫面就停 3 秒；直接送一張
+                    if (!all) WantKeyFrame();
                 }
                 i += size;
             }

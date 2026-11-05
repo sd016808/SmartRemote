@@ -55,6 +55,7 @@ namespace SmartRemote.Core
         static readonly Guid CODECAPI_AVEncCommonRateControlMode = new("1c0608e9-370c-4710-8a58-cb6181c42423");
         static readonly Guid CODECAPI_AVEncCommonMeanBitRate = new("f7222374-2144-4815-b550-a37f8e12ee52");
         static readonly Guid CODECAPI_AVEncMPVGOPSize = new("95f31b26-95a4-41aa-9303-246a7fc6eef1");
+        static readonly Guid CODECAPI_AVEncCommonBufferSize = new("0db96574-b6a4-4c8b-8106-3773de0310cd");
         static readonly Guid CODECAPI_AVEncCommonQualityVsSpeed = new("98332df8-03cd-476b-89fa-3f9e442dec9f");
         static readonly Guid CODECAPI_AVEncVideoForceKeyFrame = new("398c1b98-8353-475a-9ef2-8f265d260345");
 
@@ -81,6 +82,7 @@ namespace SmartRemote.Core
 
         static readonly Lazy<int> started = new(() => MFStartup(0x20070, 0)); // MF_VERSION，MFSTARTUP_FULL
         static volatile bool hardwareDisabled;
+        static readonly HashSet<string> failedHardware = new(); // 建立失敗過的硬體編碼器 (第幾個 + 名稱)：這次執行不再試
 
         static void Startup()
         {
@@ -133,8 +135,17 @@ namespace SmartRemote.Core
                     {
                         if (found != null) { Native.Release(ref list[i]); continue; }
                         string name = GetString(list[i], MFT_FRIENDLY_NAME_Attribute) ?? "硬體編碼器";
+                        // 失敗過的不再試：每試一次要 0.1 ~ 0.3 秒，換畫質 / 解析度重建編碼器時畫面會多停這麼久
+                        // (例如內顯的編碼器列在前面但螢幕不是接在內顯上，每次都先失敗才輪到獨顯的)
+                        string key = $"{i}:{name}";
+                        lock (failedHardware)
+                            if (failedHardware.Contains(key)) { Native.Release(ref list[i]); continue; }
                         try { found = new H264Encoder(width, height, fps, bitrate, list[i], name); }
-                        catch (Exception ex) { Logger.Warn($"[遠端畫面] 硬體編碼器 {name} 不能用: {ex.Message}"); }
+                        catch (Exception ex)
+                        {
+                            Logger.Warn($"[遠端畫面] 硬體編碼器 {name} 不能用 (這次執行不再試): {ex.Message}");
+                            lock (failedHardware) failedHardware.Add(key);
+                        }
                     }
                     CoTaskMemFree((IntPtr)list);
                     if (found != null) return found;
@@ -198,7 +209,11 @@ namespace SmartRemote.Core
                 if (Native.QueryInterface(transform, IID_ICodecAPI, out IntPtr api) >= 0) codecApi = api;
                 SetCodec(CODECAPI_AVEncCommonRateControlMode, 0); // CBR
                 SetCodec(CODECAPI_AVEncCommonMeanBitRate, (uint)bitrate);
-                SetCodec(CODECAPI_AVEncMPVGOPSize, (uint)(fps * 4));
+                // 關鍵畫格 1 分鐘才定期送一張 (原本 4 秒)：關鍵畫格比一般畫格大好幾倍，網路頻寬不夠寬時每送一張畫面就頓一下。
+                // 掉封包由重送 / 瀏覽器要求關鍵畫格處理 (RemoteSession)，不靠定期的。
+                // 不要設得更久：內建的軟體編碼器間隔設到 1 小時碼率控制會壞掉 (要 10 Mbps 只輸出 0.8 Mbps)，1 分鐘實測正常
+                SetCodec(CODECAPI_AVEncMPVGOPSize, (uint)(fps * 60));
+                SetBufferSize(bitrate);
                 SetCodec(CODECAPI_AVEncCommonQualityVsSpeed, 25); // 偏快 (0 最快、100 最好)
                 SetCodecBool(MF_LOW_LATENCY, true);
 
@@ -254,8 +269,19 @@ namespace SmartRemote.Core
         public bool SetBitrate(int bitrate)
         {
             if (SetCodec(CODECAPI_AVEncCommonMeanBitRate, (uint)bitrate) < 0) return false;
+            SetBufferSize(bitrate);
             Bitrate = bitrate;
             return true;
+        }
+
+        // 限制單張畫格的大小：CBR 的緩衝區設成 0.1 秒的流量，關鍵畫格 / 畫面大變動的那張就不會一次送出好幾百 KB
+        // (2560x1440 實測：沒設時關鍵畫格 10 Mbps 是 100 ~ 170 KB、畫面一直在動的 20 Mbps 會到 500 KB 以上；設了之後大約是平均一張的 2 倍)。
+        // 大的畫格在窄的網路上要送很久，後面的畫面全部跟著晚。代價是那一張比較糊，接下來幾張補回來。
+        // 只對 NVIDIA 的編碼器設，單位照它實際的行為是 bits (設太小的話連平均碼率都到不了：設成 1/80 秒時 10 Mbps 只輸出 8.3 Mbps)。
+        // 每家對這個設定的解讀不一樣：內建的軟體編碼器設了關鍵畫格沒有變小、其他畫格反而忽大忽小；Intel / AMD 的沒有機器可以測。都不動
+        void SetBufferSize(int bitrate)
+        {
+            if (Hardware && Name.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase)) SetCodec(CODECAPI_AVEncCommonBufferSize, (uint)(bitrate / 10));
         }
 
         /// <summary>編碼一張 (BGRA，大小要跟建立時一樣)；回傳 H.264 Annex B，編碼器還沒吐出東西時回傳 null</summary>

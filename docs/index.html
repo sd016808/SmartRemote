@@ -363,15 +363,17 @@ function send(obj) { if (dc && dc.readyState === "open") dc.send(JSON.stringify(
 // ===== 自動畫質 =====
 // 新版分享端才有 (caps.auto)。觀看頁量網路狀況、決定碼率，送給分享端 ({t:"rate", b})，解析度由分享端跟著碼率調：
 // - 一開始就用高碼率 (不像 Google 從低的慢慢加)
-// - 明確塞車才降：掉封包超過 5%，或來回時間比這陣子最低的多 100 ms 以上 (封包在路上排隊)，連續 2 秒；
-//   降到比實際收得到的量少一點 (塞車時收得到的量 ≈ 網路的上限)，一次最多降一半
-// - 網路正常、而且畫面真的有用到這麼多流量時每秒升 25% (靜止畫面不升，不然一動起來就塞爆)
-const AUTO_MIN = 500000, AUTO_MAX = 20000000, AUTO_START = 10000000;
-let autoRate = AUTO_START, autoSent = 0, autoBad = 0, autoGood = 0, autoDownAt = 0, lastLoss = null, lossRate = 0;
+// - 塞車就馬上降：來回時間比這陣子最低的多 60 ms 以上 (封包在路上排隊)，或掉封包超過 10%。
+//   降到實際收得到的量的八成 (塞車時收得到的量 ≈ 網路的上限)，一次最多降一半
+// - 記住這個上限 (收得到的量的九成)：之後只升到這裡，不再一路加到塞車、砍半、再加到塞車 (手機網路上每一輪都會卡好幾秒)。
+//   20 秒都沒塞車才再往上試，每秒只加 5%，一有排隊就退回來
+// - 畫面真的把流量用滿 (八成以上) 才升：沒用滿的時候升了也測不出網路撐不撐得住，一動起來才塞爆
+const AUTO_MIN = 500000, AUTO_MAX = 20000000, AUTO_START = 10000000, AUTO_HOLD_MS = 20000;
+let autoRate = AUTO_START, autoSent = 0, autoDownAt = 0, autoCeil = 0, autoCeilAt = 0, recvRate = 0, lastLoss = null, lossRate = 0;
 let pings = [];   // 最近 30 秒的來回時間 [{at, ms}]
 const autoOn = () => !!(caps && caps.video && caps.auto) && $("quality").value === "3";
 
-function resetAuto() { autoRate = AUTO_START; autoSent = 0; autoBad = autoGood = autoDownAt = 0; lastLoss = null; lossRate = 0; pings = []; }
+function resetAuto() { autoRate = AUTO_START; autoSent = 0; autoDownAt = autoCeil = autoCeilAt = recvRate = 0; lastLoss = null; lossRate = 0; pings = []; }
 
 function setAutoRate(b, force) {
   autoRate = Math.round(Math.min(AUTO_MAX, Math.max(AUTO_MIN, b)));
@@ -385,22 +387,40 @@ function rttNow() {
 }
 function rttBase() { return pings.length ? Math.min(...pings.map(p => p.ms)) : null; }
 
-function autoTick(recvBps) {
-  const now = Date.now(), r = rttNow(), base = rttBase();
-  const queued = r !== null && base !== null ? r - base : 0;
-  if (lossRate > 0.05 || queued > 100) {
-    autoGood = 0;
-    if (++autoBad >= 2 && now - autoDownAt > 2000) {
-      setAutoRate(Math.max(autoRate * 0.5, Math.min(autoRate * 0.8, recvBps * 0.9)));
-      autoDownAt = now; autoBad = 0;
-    }
-  } else {
-    autoBad = 0;
-    if (++autoGood >= 2 && now - autoDownAt > 3000 && recvBps > autoRate * 0.5) setAutoRate(autoRate * 1.25);
-  }
+// 封包在路上排隊排了多久：最近三次來回時間 (0.75 秒) 比基準多出來的量。取最小的：手機網路的來回時間本來就會跳，
+// 偶爾一兩次慢不算，連續三次都慢才是真的在排隊
+function queuedMs() {
+  if (pings.length < 4) return 0;
+  return Math.min(...pings.slice(-3).map(p => p.ms)) - rttBase();
 }
 
-setInterval(() => { if (caps && caps.auto) send({ t: "ping", ts: performance.now() }); }, 500);
+// 塞車就降 (每次量到來回時間、每秒都檢查，不等到塞滿)
+function autoCheck() {
+  const now = Date.now();
+  if (!autoOn() || now - autoDownAt < 1500 || !(queuedMs() > 60 || lossRate > 0.1)) return;
+  if (recvRate < autoRate * 0.3) return;   // 畫面幾乎沒在送：不是我們塞的，降了也沒用
+  const got = Math.min(autoRate, Math.max(recvRate, autoRate * 0.5));
+  autoCeil = got * 0.9;
+  autoCeilAt = autoDownAt = now;
+  setAutoRate(Math.max(autoRate * 0.5, got * 0.8));
+}
+
+// 每秒一次：recvBps = 這一秒實際收到的量
+function autoTick(recvBps) {
+  recvRate = recvBps;
+  autoCheck();
+  const now = Date.now();
+  if (queuedMs() > 30 || lossRate > 0.05 || now - autoDownAt < 3000 || recvBps < autoRate * 0.8) return;
+  let next = autoRate * 1.25;
+  if (autoCeil) {
+    if (autoRate < autoCeil) next = Math.min(next, autoCeil);   // 上限以下：很快升回來
+    else if (now - autoCeilAt < AUTO_HOLD_MS) return;           // 到上限了：先待著
+    else next = autoRate * 1.05;                                // 很久沒塞車：慢慢往上試
+  }
+  setAutoRate(next);
+}
+
+setInterval(() => { if (caps && caps.auto) send({ t: "ping", ts: performance.now() }); }, 250);
 
 // ===== 連線 =====
 async function connect(room, pass, attempt = 1) {
@@ -546,6 +566,7 @@ function onText(ch, m) {
     case "pong":
       pings.push({ at: Date.now(), ms: performance.now() - m.ts });
       while (pings.length && Date.now() - pings[0].at > 30000) pings.shift();
+      autoCheck();
       break;
     case "encoder":   // 電腦端實際用的編碼器
       $("encoder").title = `目前：${m.name || (m.hw ? "硬體編碼" : "軟體編碼")}`;
