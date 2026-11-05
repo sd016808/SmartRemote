@@ -33,6 +33,8 @@ namespace SmartRemote.Core
             Native.UsePerMonitorDpi(); // 座標用實際像素 (跟截圖一致)
             foreach (var action in queue.GetConsumingEnumerable())
             {
+                // SendInput 只會送到執行緒所在的桌面：UAC / 鎖定畫面出現時要跟過去 (只有以 SYSTEM 執行時切得過去)
+                Native.FollowInputDesktop(20);
                 try { action(); }
                 catch (Exception ex) { Logger.Warn($"[遠端畫面] 觀看端 {id} 輸入處理失敗: {ex.Message}"); }
             }

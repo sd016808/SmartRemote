@@ -54,6 +54,57 @@ namespace SmartRemote.Core
 
         [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
 
+        // ===== 安全桌面 (UAC 確認視窗、鎖定畫面、登入畫面) =====
+        // Windows 顯示這些畫面時會切到另一個桌面 (Winlogon)，截圖與 SendInput 都只對執行緒所在的桌面有效。
+        // 以 SYSTEM 執行 (系統服務開的遠端程式) 時才能切過去；一般程式 (就算是系統管理員) 在安全桌面時 OpenInputDesktop 會失敗，
+        // 這裡就什麼都不做，跟以前一樣。執行緒有視窗或 hook 的話不能切 (SetThreadDesktop 會失敗)，截圖、遙控的執行緒都沒有
+        [ThreadStatic] static IntPtr followedDesktop; // 這條執行緒切過去的桌面 (要開著，切走之後才關)
+        [ThreadStatic] static long nextDesktopCheck;
+
+        /// <summary>讓目前這條執行緒跟著接收輸入的桌面 (一般桌面 ↔ 安全桌面)；有切換回傳 true。minIntervalMs = 最少隔多久才再查一次</summary>
+        public static bool FollowInputDesktop(int minIntervalMs = 0)
+        {
+            long now = Environment.TickCount64;
+            if (now < nextDesktopCheck) return false;
+            nextDesktopCheck = now + minIntervalMs;
+            IntPtr input = OpenInputDesktop(0, false, MAXIMUM_ALLOWED);
+            if (input == IntPtr.Zero) return false; // 沒權限 (一般程式遇到安全桌面)
+            string want = DesktopName(input), have = DesktopName(GetThreadDesktop(GetCurrentThreadId()));
+            if (want == null || string.Equals(want, have, StringComparison.OrdinalIgnoreCase) || !SetThreadDesktop(input))
+            {
+                CloseDesktop(input);
+                return false;
+            }
+            if (followedDesktop != IntPtr.Zero) CloseDesktop(followedDesktop);
+            followedDesktop = input;
+            Logger.Info($"[遠端畫面] 切到桌面 {want} ({Thread.CurrentThread.Name})");
+            return true;
+        }
+
+        /// <summary>目前接收輸入的桌面名稱 (Default = 一般桌面、Winlogon = 安全桌面)；沒權限查回傳 null</summary>
+        public static string InputDesktopName()
+        {
+            IntPtr input = OpenInputDesktop(0, false, MAXIMUM_ALLOWED);
+            if (input == IntPtr.Zero) return null;
+            try { return DesktopName(input); }
+            finally { CloseDesktop(input); }
+        }
+
+        static string DesktopName(IntPtr desktop)
+        {
+            if (desktop == IntPtr.Zero) return null;
+            char* buffer = stackalloc char[256];
+            return GetUserObjectInformationW(desktop, 2, buffer, 512, out uint needed) ? new string(buffer) : null; // UOI_NAME
+        }
+
+        const uint MAXIMUM_ALLOWED = 0x02000000;
+        [DllImport("user32.dll", SetLastError = true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+        [DllImport("user32.dll", SetLastError = true)] static extern bool SetThreadDesktop(IntPtr desktop);
+        [DllImport("user32.dll", SetLastError = true)] static extern IntPtr GetThreadDesktop(uint threadId);
+        [DllImport("user32.dll", SetLastError = true)] static extern bool CloseDesktop(IntPtr desktop);
+        [DllImport("user32.dll", SetLastError = true)] static extern bool GetUserObjectInformationW(IntPtr obj, int index, char* info, uint length, out uint needed);
+        [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+
         // ===== 精確等待 =====
         // Thread.Sleep 的精度約 15.6 ms (要等 4 ms 也會等 16 ms)，60 張/秒會被壓成 30 張，所以用高精度的計時器 (Win10 1803 以後才有，沒有就退回 Thread.Sleep)
         [ThreadStatic] static IntPtr timer;

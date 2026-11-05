@@ -1,4 +1,5 @@
 using SmartRemote.Core;
+using SmartRemote.Service;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -9,7 +10,7 @@ namespace SmartRemote.Tray
     /// <summary>
     /// 系統匣介面，直接呼叫 Win32 (不用 WinForms，WinForms 不能 Native AOT)。
     /// 右鍵圖示看房間碼與密碼、複製網址、開關遙控、中斷連線；雙擊圖示 = 複製觀看網址。
-    /// 不跳任何通知。
+    /// 不跳任何通知。真正在連線的是 ITrayEngine：一般模式是這個程式自己，服務模式是系統服務開的遠端程式
     /// </summary>
     internal sealed unsafe class TrayIcon
     {
@@ -26,21 +27,20 @@ namespace SmartRemote.Tray
         const uint NIF_MESSAGE = 0x1, NIF_ICON = 0x2, NIF_TIP = 0x4;
         const uint GMEM_MOVEABLE = 0x0002, CF_UNICODETEXT = 13;
 
-        const int CmdNone = 0, CmdCopyCode = 1, CmdCopyUrl = 2, CmdControl = 3, CmdPause = 4, CmdRecord = 5, CmdSettings = 6, CmdLogs = 7, CmdExit = 8, CmdUpdate = 9, CmdAutoStart = 10;
+        const int CmdNone = 0, CmdCopyCode = 1, CmdCopyUrl = 2, CmdControl = 3, CmdPause = 4, CmdRecord = 5, CmdSettings = 6, CmdLogs = 7, CmdExit = 8, CmdUpdate = 9, CmdAutoStart = 10, CmdService = 11, CmdRestartService = 12;
 
         static readonly ConcurrentQueue<Action> queue = new();
         static TrayIcon current; // 視窗程序是靜態函式，要用這個找到實例
 
         readonly IntPtr hwnd;
-        readonly string room, password;
+        readonly ITrayEngine engine;
         bool exiting;
         bool autoStart;   // 開機自動啟動 (設定檔 autoStart，右鍵選單切換)
 
-        public TrayIcon(Settings settings)
+        public TrayIcon(Settings settings, ITrayEngine engine)
         {
             current = this;
-            room = settings.Room != "" ? settings.Room : RemoteView.RandomCode(8);
-            password = settings.Password != "" ? settings.Password : RemoteView.RandomCode(10);
+            this.engine = engine;
             autoStart = settings.AutoStart;
 
             IntPtr instance = GetModuleHandleW(IntPtr.Zero);
@@ -59,12 +59,8 @@ namespace SmartRemote.Tray
             var nid = Notify(NIF_MESSAGE | NIF_ICON | NIF_TIP);
             if (!Shell_NotifyIconW(NIM_ADD, &nid)) Logger.Warn($"系統匣圖示建立失敗 (Windows 錯誤碼 {Marshal.GetLastPInvokeError()})");
 
-            RemoteView.StateChanged += () => Post(UpdateTip);
+            engine.StateChanged += () => Post(UpdateTip);
             UpdateTip();
-
-            // SMARTREMOTE_DRYRUN=1 只給測試用：遙控的輸入與剪貼簿只寫日誌，不真的動滑鼠鍵盤
-            RemoteView.Start(room, password, settings.Control, Environment.GetEnvironmentVariable("SMARTREMOTE_DRYRUN") == "1");
-            Logger.Info($"SmartRemote 啟動：房間碼 {room}，{(settings.Control ? "可遙控" : "只能看")}");
         }
 
         /// <summary>從外部結束 (定時更新換好檔案後用)：移除圖示並結束訊息迴圈</summary>
@@ -114,21 +110,25 @@ namespace SmartRemote.Tray
         void ShowMenu()
         {
             IntPtr menu = CreatePopupMenu();
-            Add(menu, MF_STRING | MF_GRAYED, 0, $"房間碼 {room}　密碼 {password}");
+            bool known = engine.Room != "";
+            bool service = engine.IsService;
+            Add(menu, MF_STRING | MF_GRAYED, 0, known ? $"房間碼 {engine.Room}　密碼 {engine.Password}" : "房間碼讀取中… (遠端服務還沒回應)");
             Add(menu, MF_SEPARATOR, 0, null);
-            Add(menu, MF_STRING, CmdCopyCode, "複製房間碼與密碼");
-            Add(menu, MF_STRING, CmdCopyUrl, "複製觀看網址 (含房間碼與密碼)");
+            Add(menu, MF_STRING | (known ? 0 : MF_GRAYED), CmdCopyCode, "複製房間碼與密碼");
+            Add(menu, MF_STRING | (known ? 0 : MF_GRAYED), CmdCopyUrl, "複製觀看網址 (含房間碼與密碼)");
             Add(menu, MF_SEPARATOR, 0, null);
-            Add(menu, MF_STRING | (RemoteView.AllowControl ? MF_CHECKED : 0), CmdControl, "允許遙控");
-            Add(menu, MF_STRING | (RemoteView.Paused ? MF_CHECKED : 0), CmdPause, "中斷所有連線並暫停接受");
+            Add(menu, MF_STRING | (engine.AllowControl ? MF_CHECKED : 0), CmdControl, "允許遙控");
+            Add(menu, MF_STRING | (engine.Paused ? MF_CHECKED : 0), CmdPause, "中斷所有連線並暫停接受");
             Add(menu, MF_STRING, CmdUpdate, "檢查更新");
-            Add(menu, MF_STRING | (autoStart ? MF_CHECKED : 0), CmdAutoStart, "開機自動啟動");
+            Add(menu, MF_STRING | (service ? MF_CHECKED : 0), CmdService, "以系統服務執行 (可操作 UAC、鎖定畫面、登入畫面)");
+            Add(menu, MF_STRING | (autoStart ? MF_CHECKED : 0), CmdAutoStart, service ? "登入時顯示這個圖示" : "開機自動啟動");
             Add(menu, MF_SEPARATOR, 0, null);
             Add(menu, MF_STRING, CmdRecord, "開啟連線紀錄");
             Add(menu, MF_STRING, CmdSettings, "開啟設定檔");
             Add(menu, MF_STRING, CmdLogs, "開啟日誌資料夾");
+            if (service) Add(menu, MF_STRING, CmdRestartService, "重新啟動遠端服務 (改了設定檔後套用)");
             Add(menu, MF_SEPARATOR, 0, null);
-            Add(menu, MF_STRING, CmdExit, "結束");
+            Add(menu, MF_STRING, CmdExit, service ? "關閉圖示 (遠端服務繼續執行)" : "結束");
 
             GetCursorPos(out POINT pt);
             SetForegroundWindow(hwnd);   // 不這樣做選單點外面不會關
@@ -142,12 +142,14 @@ namespace SmartRemote.Tray
         {
             switch (cmd)
             {
-                case CmdCopyCode: SetClipboardText($"房間碼：{room}\n密碼：{password}"); break;
-                case CmdCopyUrl: SetClipboardText($"{RemoteView.ViewerUrl}#{room}/{Uri.EscapeDataString(password)}"); break;
-                case CmdControl: RemoteView.SetControl(!RemoteView.AllowControl); break;
-                case CmdPause: RemoteView.TogglePause(); break;
+                case CmdCopyCode: if (engine.Room != "") SetClipboardText($"房間碼：{engine.Room}\n密碼：{engine.Password}"); break;
+                case CmdCopyUrl: if (engine.Room != "") SetClipboardText($"{RemoteView.ViewerUrl}#{engine.Room}/{Uri.EscapeDataString(engine.Password)}"); break;
+                case CmdControl: engine.SetControl(!engine.AllowControl); break;
+                case CmdPause: engine.TogglePause(); break;
+                case CmdService: ToggleService(); break;
+                case CmdRestartService: RestartService(); break;
                 case CmdRecord: OpenPath(RemoteLog.FilePath); break;
-                case CmdSettings: OpenPath(Settings.FilePath); break;
+                case CmdSettings: OpenSettings(); break;
                 case CmdLogs: OpenPath(AppPaths.InBaseDir("logs")); break;
                 case CmdUpdate: CheckForUpdate(); break;
                 case CmdAutoStart: ToggleAutoStart(); break;
@@ -182,7 +184,7 @@ namespace SmartRemote.Tray
                     }
 
                     string notes = string.IsNullOrEmpty(update.Notes) ? "" : $"\n\n更新內容：\n{(update.Notes.Length > 800 ? update.Notes[..800] + "…" : update.Notes)}";
-                    int viewers = RemoteView.Connections;
+                    int viewers = engine.Connections;
                     string warn = viewers > 0 ? $"\n\n目前有 {viewers} 個人連線中，更新時程式會重新啟動，連線會中斷。" : "\n\n更新時程式會重新啟動。";
                     if (Win32.Message($"有新版 v{update.Version} (目前 v{AutoUpdater.CurrentVersion})，要現在更新嗎？{notes}{warn}",
                                       Title, Win32.MB_YESNO | Win32.MB_ICONQUESTION) != Win32.IDYES)
@@ -195,6 +197,12 @@ namespace SmartRemote.Tray
                         Win32.Message("更新失敗，已還原成原本的版本。詳細原因請看日誌資料夾 (右鍵圖示 →「開啟日誌資料夾」)。", Title, Win32.MB_ICONERROR);
                         return;
                     }
+                    // 服務模式：換好的檔案跟服務是同一份 (Program Files)，重新啟動服務才會用新版
+                    if (engine.IsService)
+                    {
+                        try { ServiceSetup.Restart(); }
+                        catch (Exception ex) { Logger.Warn($"更新後重新啟動系統服務失敗: {ex.Message}"); }
+                    }
                     Post(() =>
                     {
                         AutoUpdater.Relaunch();
@@ -203,6 +211,84 @@ namespace SmartRemote.Tray
                 }
                 finally { Interlocked.Exchange(ref updating, 0); }
             }) { IsBackground = true, Name = "ManualUpdate" }.Start();
+        }
+
+        // ===== 系統服務 =====
+        int serviceBusy;
+
+        // 安裝 / 移除系統服務 (先問)。安裝完從 Program Files 重新開系統匣程式 (服務模式)，移除完重新開 (一般模式)
+        void ToggleService()
+        {
+            if (Interlocked.Exchange(ref serviceBusy, 1) == 1) return;
+            bool install = !engine.IsService;
+            new Thread(() =>
+            {
+                const string Title = "SmartRemote 系統服務";
+                try
+                {
+                    string ask = install
+                        ? "安裝成系統服務後：\n" +
+                          "• UAC 確認視窗、鎖定畫面、登入畫面都能遠端看和操作\n" +
+                          "• 開機就會啟動，還沒有人登入 Windows 也能連 (知道房間碼和密碼的人就能看到登入畫面)\n" +
+                          $"• 程式會複製到 {ServiceSetup.InstallDir}，之後都從那裡執行，設定檔也在那裡 (只有系統管理員能讀寫)\n\n" +
+                          "目前的連線會中斷。要安裝嗎？"
+                        : "移除系統服務後回到一般模式：UAC 確認視窗、鎖定畫面、登入畫面看不到也不能操作。\n\n目前的連線會中斷。要移除嗎？";
+                    if (Win32.Message(ask, Title, Win32.MB_YESNO | Win32.MB_ICONQUESTION) != Win32.IDYES) return;
+
+                    Post(() => ShowTip(install ? "安裝系統服務中…" : "移除系統服務中…"));
+                    try
+                    {
+                        if (install)
+                        {
+                            engine.Stop();
+                            ServiceSetup.Install(AppContext.BaseDirectory);
+                        }
+                        else ServiceSetup.Uninstall();
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn($"{(install ? "安裝" : "移除")}系統服務失敗: {ex.Message}");
+                        Win32.Message($"{(install ? "安裝" : "移除")}系統服務失敗：\n\n{ex.Message}", Title, Win32.MB_ICONERROR);
+                        if (!install) { Post(UpdateTip); return; }
+                        // 安裝失敗：連線已經停了，重新開一次回到原本的樣子
+                    }
+
+                    // 安裝好：從 Program Files 開 (服務模式)；移除 / 安裝失敗：重新開這一份。
+                    // 先跳完提示再開新的 (新的會等這個結束，最多等 30 秒)
+                    bool installed = install && ServiceSetup.Installed;
+                    if (installed && !ServiceSetup.IsInstalledCopy(Environment.ProcessPath))
+                        Win32.Message($"已安裝成系統服務。\n\n程式已複製到 {ServiceSetup.InstallDir}，之後都從那裡執行；原本的資料夾 {AppContext.BaseDirectory} 可以刪掉。",
+                                      Title, Win32.MB_ICONINFORMATION);
+                    string exe = installed ? ServiceSetup.InstalledExe : Environment.ProcessPath;
+                    var info = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe) };
+                    info.ArgumentList.Add(AutoUpdater.AfterUpdateArg);
+                    Process.Start(info);
+                    Post(Exit);
+                }
+                finally { Interlocked.Exchange(ref serviceBusy, 0); }
+            }) { IsBackground = true, Name = "ServiceSetup" }.Start();
+        }
+
+        // 重新啟動遠端服務 (改了設定檔之後套用；房間碼 / 密碼沒填的話會換新的)
+        void RestartService()
+        {
+            if (Interlocked.Exchange(ref serviceBusy, 1) == 1) return;
+            ShowTip("重新啟動遠端服務中…");
+            new Thread(() =>
+            {
+                try
+                {
+                    ServiceSetup.Restart();
+                    Post(() => ShowTip("遠端服務已重新啟動"));
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"重新啟動系統服務失敗: {ex.Message}");
+                    Win32.Message($"重新啟動遠端服務失敗：\n\n{ex.Message}", "SmartRemote 系統服務", Win32.MB_ICONERROR);
+                    Post(UpdateTip);
+                }
+                finally { Interlocked.Exchange(ref serviceBusy, 0); }
+            }) { IsBackground = true, Name = "ServiceRestart" }.Start();
         }
 
         // 開機自動啟動：建立 / 刪掉工作排程 (最高權限) 並寫回設定檔；結果顯示在圖示的提示文字 (不跳通知)
@@ -240,7 +326,7 @@ namespace SmartRemote.Tray
         void UpdateTip()
         {
             var nid = Notify(NIF_TIP);
-            string text = $"SmartRemote：{RemoteView.Status}";
+            string text = $"SmartRemote{(engine.IsService ? " (系統服務)" : "")}：{engine.Status}";
             SetTip(ref nid, text.Length > 127 ? text[..127] : text);
             Shell_NotifyIconW(NIM_MODIFY, &nid);
         }
@@ -249,6 +335,7 @@ namespace SmartRemote.Tray
         {
             if (exiting) return;
             exiting = true;
+            if (engine.IsService) engine.Stop(); // 服務模式只是關掉圖示，遠端服務繼續執行
             var nid = Notify(0);
             Shell_NotifyIconW(NIM_DELETE, &nid);
             DestroyWindow(hwnd);
@@ -298,6 +385,14 @@ namespace SmartRemote.Tray
                 if (SetClipboardData(CF_UNICODETEXT, mem) == IntPtr.Zero) GlobalFree(mem);
             }
             finally { CloseClipboard(); }
+        }
+
+        // 服務模式的設定檔只有系統管理員能改：用這個程式 (系統管理員權限) 開記事本，不然存不了檔
+        void OpenSettings()
+        {
+            if (!engine.IsService) { OpenPath(Settings.FilePath); return; }
+            try { Process.Start(new ProcessStartInfo("notepad.exe") { UseShellExecute = false, ArgumentList = { Settings.FilePath } }); }
+            catch (Exception ex) { Logger.Warn($"無法開啟設定檔: {ex.Message}"); }
         }
 
         static void OpenPath(string path)

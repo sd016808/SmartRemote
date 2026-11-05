@@ -3,6 +3,9 @@ namespace SmartRemote.Core
     /// <summary>日誌：exe 旁的 logs/ 資料夾，每天一個檔案 (smartremote_yyyyMMdd.log)，超過 14 天的舊檔自動刪除</summary>
     public static class Logger
     {
+        /// <summary>檔名開頭 (預設 smartremote)：同時有好幾個程式在寫 (系統服務、遠端程式、系統匣) 時各寫各的，不會互搶檔案</summary>
+        public static string FilePrefix { get; set; } = "smartremote";
+
         const int KeepDays = 14;
 
         static readonly string LogDir = AppPaths.InBaseDir("logs");
@@ -25,7 +28,7 @@ namespace SmartRemote.Core
                 {
                     Directory.CreateDirectory(LogDir);
                     if (cleanedDate != now.Date) DeleteOldLogs(now.Date);
-                    File.AppendAllText(Path.Combine(LogDir, $"smartremote_{now:yyyyMMdd}.log"), logLine + Environment.NewLine);
+                    File.AppendAllText(Path.Combine(LogDir, $"{FilePrefix}_{now:yyyyMMdd}.log"), logLine + Environment.NewLine);
                 }
                 catch (Exception) { }
             }
@@ -35,7 +38,7 @@ namespace SmartRemote.Core
         static void DeleteOldLogs(DateTime today)
         {
             cleanedDate = today;
-            foreach (string file in Directory.GetFiles(LogDir, "smartremote_*.log"))
+            foreach (string file in Directory.GetFiles(LogDir, $"{FilePrefix}_*.log"))
             {
                 try
                 {

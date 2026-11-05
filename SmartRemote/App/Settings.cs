@@ -45,6 +45,9 @@ namespace SmartRemote.Core
             return s;
         }
 
+        /// <summary>在指定的位置寫一份範例設定檔 (安裝成系統服務時用)</summary>
+        public static void WriteExample(string path) => File.WriteAllText(path, Example);
+
         /// <summary>把 autoStart 寫回設定檔 (右鍵選單切換時)：只改這一個值，其他內容與註解照舊；舊設定檔沒有這一行就加在最後</summary>
         public static void SaveAutoStart(bool value)
         {

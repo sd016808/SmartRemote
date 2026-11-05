@@ -7,12 +7,165 @@ using System.Runtime.InteropServices;
 namespace SmartRemote.Core
 {
     /// <summary>
-    /// 截一個螢幕的畫面 (含滑鼠游標)，給遠端畫面用。
+    /// 一個觀看端看的螢幕畫面 (含滑鼠游標)。同一個螢幕在這個程式裡只截一份 (CaptureSource，自己一條執行緒)，
+    /// 所有觀看端共用：同一個程式同時對同一個螢幕開兩份 Desktop Duplication 會失敗 (E_INVALIDARG)，
+    /// 以前第二個觀看端 (同時看、或重新連線時舊的還沒斷乾淨) 就只能改用 GDI，又慢又常卡在第一張。
+    /// 每個觀看端拿到的是自己的一份複本 (用完 FramePool.Return)
+    /// </summary>
+    sealed class ScreenCapture : IDisposable
+    {
+        readonly CaptureSource source;
+        long seen; // 這個觀看端拿過的最後一張的編號 (0 = 還沒拿過；第一張是 1)
+        bool disposed;
+
+        public ScreenCapture(Native.Monitor monitor) => source = CaptureSource.Acquire(monitor);
+
+        /// <summary>目前截不到畫面的原因 (例如電腦正在顯示 UAC 確認視窗 / 鎖定畫面)；null = 正常</summary>
+        public string Problem => source.Problem;
+        public bool UsingGdi => source.UsingGdi;
+
+        /// <summary>最近一次 Grab 回傳的畫面是新的 (畫面或游標有變)，不是 force 補送的</summary>
+        public bool Changed { get; private set; }
+
+        /// <summary>
+        /// 等新的畫面 (最多 timeoutMs)，有就回傳 (BGRA，含游標，呼叫端負責 Dispose 或 FramePool.Return)；
+        /// force = 沒有新的也回傳最近一張 (定時補送、剛換畫質)。還沒有任何畫面回傳 null
+        /// </summary>
+        public Mat Grab(int timeoutMs, bool force)
+        {
+            Mat img = source.Next(ref seen, timeoutMs, force, out bool changed);
+            Changed = changed;
+            return img;
+        }
+
+        public void Dispose()
+        {
+            if (disposed) return;
+            disposed = true;
+            source.Release();
+        }
+    }
+
+    /// <summary>一個螢幕的截圖來源：自己一條執行緒一直截 (DesktopCapturer)，有新的一張就給等著的觀看端；沒人用了就關掉</summary>
+    sealed class CaptureSource
+    {
+        static readonly Dictionary<IntPtr, CaptureSource> sources = new();
+
+        readonly Native.Monitor monitor;
+        readonly object gate = new();
+        int users;
+        volatile bool stopping;
+        Mat latest;   // 最近一張 (畫面 + 游標)
+        long seq;     // latest 的編號，每張新的加一
+        volatile string problem;
+        volatile bool gdi;
+
+        public string Problem => problem;
+        public bool UsingGdi => gdi;
+
+        CaptureSource(Native.Monitor monitor)
+        {
+            this.monitor = monitor;
+            new Thread(Run) { IsBackground = true, Name = "ScreenCapture" }.Start();
+        }
+
+        public static CaptureSource Acquire(Native.Monitor monitor)
+        {
+            lock (sources)
+            {
+                if (!sources.TryGetValue(monitor.Handle, out var src) || src.stopping)
+                {
+                    src = new CaptureSource(monitor);
+                    sources[monitor.Handle] = src;
+                }
+                src.users++;
+                return src;
+            }
+        }
+
+        public void Release()
+        {
+            lock (sources)
+            {
+                if (--users > 0) return;
+                stopping = true;
+                if (sources.TryGetValue(monitor.Handle, out var src) && src == this) sources.Remove(monitor.Handle);
+            }
+            lock (gate) Monitor.PulseAll(gate);
+        }
+
+        void Run()
+        {
+            Native.UsePerMonitorDpi();
+            DesktopCapturer capturer = null;
+            try
+            {
+                capturer = new DesktopCapturer(monitor);
+                gdi = capturer.UsingGdi;
+                problem = capturer.Problem;
+                while (!stopping)
+                {
+                    // GDI 不知道畫面有沒有變：每次都截 (間隔短一點，不然每秒只有幾張)
+                    Mat img = capturer.Grab(capturer.UsingGdi ? 16 : 100, false);
+                    problem = capturer.Problem;
+                    gdi = capturer.UsingGdi;
+                    if (img == null) continue;
+                    lock (gate)
+                    {
+                        FramePool.Return(latest);
+                        latest = img;
+                        seq++;
+                        Monitor.PulseAll(gate);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                problem = $"截圖失敗：{ex.Message}";
+                Logger.Warn($"[遠端畫面] 螢幕 {monitor.Bounds.Width}x{monitor.Bounds.Height} 截圖執行緒結束: {ex.Message}");
+            }
+            finally
+            {
+                capturer?.Dispose();
+                lock (gate)
+                {
+                    FramePool.Return(latest);
+                    latest = null;
+                }
+                FramePool.Clear();
+            }
+        }
+
+        /// <summary>給觀看端：比 seen 新的一張 (等最多 timeoutMs)；force = 沒有新的也給最近一張</summary>
+        public Mat Next(ref long seen, int timeoutMs, bool force, out bool changed)
+        {
+            changed = false;
+            long end = Environment.TickCount64 + Math.Max(0, timeoutMs);
+            lock (gate)
+            {
+                while (seq <= seen && !stopping)
+                {
+                    long left = end - Environment.TickCount64;
+                    if (left <= 0) break;
+                    Monitor.Wait(gate, (int)left);
+                }
+                if (latest == null || (seq <= seen && !force)) return null;
+                changed = seq > seen;
+                seen = seq;
+                Mat copy = FramePool.Rent(latest.Rows, latest.Cols, latest.Type());
+                latest.CopyTo(copy);
+                return copy;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 真正去截一個螢幕的畫面 (含滑鼠游標)，CaptureSource 用。
     /// 優先用 DXGI Desktop Duplication：直接從顯示卡拿畫面，快、而且知道畫面有沒有變 (沒變就不用重新編碼送出)；
     /// 這台電腦不支援 (例如筆電內顯 / 獨顯混用時螢幕不是接在這張顯示卡上) 就改用 GDI 截圖 (比較慢、每次都當作有變)。
     /// 必須在同一條執行緒建立與使用 (執行緒要先 Native.UsePerMonitorDpi)
     /// </summary>
-    sealed unsafe class ScreenCapture : IDisposable
+    sealed unsafe class DesktopCapturer : IDisposable
     {
         readonly Native.Monitor monitor;
         IntPtr device, context, duplication, staging;
@@ -36,27 +189,37 @@ namespace SmartRemote.Core
 
         public bool UsingGdi => useGdi;
 
-        /// <summary>最近一次 Grab 回傳的畫面是因為畫面 (或游標) 真的有變，不是 force 補送的。GDI 截圖分不出來，一律是 false</summary>
+        /// <summary>最近一次 Grab 回傳的畫面是因為畫面 (或游標) 真的有變，不是 force 補送的。GDI 截圖分不出來，一律當作有變</summary>
         public bool Changed { get; private set; }
 
-        public ScreenCapture(Native.Monitor monitor)
+        public DesktopCapturer(Native.Monitor monitor)
         {
             this.monitor = monitor;
-            try { Open(); }
-            catch (COMException ex) when (ex.HResult == E_ACCESSDENIED)
+            // 兩個觀看端同時開始時，兩條執行緒同時 DuplicateOutput 會有一個失敗 (E_INVALIDARG)：
+            // 失敗先等一下重試幾次，真的不行才改用 GDI (GDI 慢很多、也不知道畫面有沒有變)
+            for (int attempt = 1; ; attempt++)
             {
-                // 現在是安全桌面 (UAC / 鎖定畫面)：之後還能用，Grab 會每秒重試
-                Close();
-                Problem = SecureDesktopText;
-                Logger.Info($"[遠端畫面] 還不能截圖 (每秒重試): {ex.Message}");
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn($"[遠端畫面] 螢幕 {monitor.Bounds} 不能用 Desktop Duplication，改用 GDI 截圖: {ex.Message}");
-                Close();
-                useGdi = true;
+                try { Open(); return; }
+                catch (COMException ex) when (ex.HResult == E_ACCESSDENIED)
+                {
+                    // 現在是安全桌面 (UAC / 鎖定畫面)：之後還能用，Grab 會每秒重試
+                    Close();
+                    Problem = SecureDesktopText;
+                    Logger.Info($"[遠端畫面] 還不能截圖 (每秒重試): {ex.Message}");
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Close();
+                    if (attempt < 4) { Thread.Sleep(250 * attempt); continue; }
+                    Logger.Warn($"[遠端畫面] 螢幕 {monitor.Bounds.Width}x{monitor.Bounds.Height} ({monitor.Bounds.X}, {monitor.Bounds.Y}) 不能用 Desktop Duplication，改用 GDI 截圖: {ex.Message}");
+                    useGdi = true;
+                    return;
+                }
             }
         }
+
+        static readonly object openLock = new(); // 同一個程式裡一次只建一個 (不同螢幕各自的 CaptureSource 同時開始時)
 
         /// <summary>
         /// 等畫面有變 (最多 timeoutMs)，有變就回傳新的一張 (BGRA，含游標，呼叫端負責 Dispose)；
@@ -68,9 +231,19 @@ namespace SmartRemote.Core
             if (useGdi)
             {
                 Thread.Sleep(timeoutMs);
-                return GrabGdi();
+                // 切到安全桌面的那一下 GDI 會出錯 (控制代碼無效)：這一張就不送，不要讓整個連線斷掉
+                try { Mat img = GrabGdi(); Problem = null; Changed = true; return img; }
+                catch (Exception ex)
+                {
+                    if (Problem == null) Logger.Info($"[遠端畫面] GDI 截圖失敗: {ex.Message}");
+                    Problem = SecureDesktopText;
+                    return null;
+                }
             }
             bool changed = false;
+            // 接收輸入的桌面換了 (UAC / 鎖定畫面出現或結束)：切過去重新建立 (只有以 SYSTEM 執行時切得過去)。
+            // 通常 DXGI 自己也會回報 ACCESS_LOST，這裡是保險
+            if (Native.FollowInputDesktop(500)) { Close(); nextRetryAt = 0; }
             if (duplication == IntPtr.Zero)
             {
                 // 重新建立 (畫面切到安全桌面 / 解析度改變之後)：每秒試一次
@@ -149,6 +322,12 @@ namespace SmartRemote.Core
         // 找到這個螢幕接在哪張顯示卡的哪個輸出，在那張顯示卡上建立 D3D11 裝置並開始複製畫面
         void Open()
         {
+            lock (openLock) OpenLocked();
+        }
+
+        void OpenLocked()
+        {
+            Native.FollowInputDesktop(); // DuplicateOutput 要在接收輸入的那個桌面上呼叫
             IntPtr factory = IntPtr.Zero, adapter = IntPtr.Zero, output = IntPtr.Zero, output1 = IntPtr.Zero;
             try
             {
@@ -315,6 +494,7 @@ namespace SmartRemote.Core
         // ===== GDI 截圖 (Desktop Duplication 不能用時) =====
         Mat GrabGdi()
         {
+            Native.FollowInputDesktop(200);
             Rect b = monitor.Bounds;
             using var bmp = new System.Drawing.Bitmap(b.Width, b.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
             using (var g = System.Drawing.Graphics.FromImage(bmp))

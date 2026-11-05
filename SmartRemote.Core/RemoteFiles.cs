@@ -24,6 +24,21 @@ namespace SmartRemote.Core
         long uploadSize;
         volatile bool closed;
 
+        /// <summary>
+        /// 瀏覽的第一層顯示哪些常用資料夾 (名稱, 路徑)。預設是執行這個程式的使用者的；
+        /// 以 SYSTEM 執行 (系統服務) 時要換成目前登入的使用者的，不然會是系統帳號的資料夾
+        /// </summary>
+        public static Func<IEnumerable<(string Name, string Path)>> CommonFolders { get; set; } = DefaultFolders;
+
+        static IEnumerable<(string, string)> DefaultFolders()
+        {
+            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            yield return ("桌面", Environment.GetFolderPath(Environment.SpecialFolder.Desktop));
+            yield return ("下載", Path.Combine(home, "Downloads"));
+            yield return ("文件", Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
+            yield return ("圖片", Environment.GetFolderPath(Environment.SpecialFolder.MyPictures));
+        }
+
         public RemoteFiles(RTCDataChannel dc, string id, Action<string> record)
         {
             this.dc = dc;
@@ -70,12 +85,8 @@ namespace SmartRemote.Core
                 if (string.IsNullOrEmpty(path))
                 {
                     // 常用資料夾 + 磁碟
-                    void Folder(string name, string full) { if (Directory.Exists(full)) Item(w, name, full, true, 0, null); }
-                    string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                    Folder("桌面", Environment.GetFolderPath(Environment.SpecialFolder.Desktop));
-                    Folder("下載", Path.Combine(home, "Downloads"));
-                    Folder("文件", Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
-                    Folder("圖片", Environment.GetFolderPath(Environment.SpecialFolder.MyPictures));
+                    foreach (var (name, full) in CommonFolders())
+                        if (!string.IsNullOrEmpty(full) && Directory.Exists(full)) Item(w, name, full, true, 0, null);
                     foreach (var d in DriveInfo.GetDrives().Where(d => d.IsReady))
                         Item(w, $"{d.Name.TrimEnd('\\')} {d.VolumeLabel}".Trim(), d.RootDirectory.FullName, true, 0, null);
                 }
