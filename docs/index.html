@@ -82,12 +82,12 @@
     .btn .label { display:none; }
   }
   .bar select { padding:6px 8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); }
-  #stage { flex:1; min-height:0; overflow:auto; display:flex; background:#000; position:relative; outline:none; }
+  #stage { flex:1; min-height:0; overflow:auto; display:flex; background:#000; position:relative; outline:none; touch-action:none; }
   .media { display:block; margin:auto; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
   /* 顯示方式：填滿寬度 (太高就捲動) / 整個畫面 (縮到看得到全部) / 原始大小 (跟著瀏覽器縮放、手機可以兩指放大) */
   .media.width { width:100%; height:auto; }
   .media.fit { width:100%; height:100%; object-fit:contain; }
-  /* 遙控中：觸控不捲動畫面、不放大 (手勢都送到電腦) */
+  /* 觸控的捲動、放大都自己處理 (瀏覽器自己的放大會連工具列一起放大；遙控中手勢要送到電腦)：見 touchDown / setZoom */
   #stage.control { touch-action:none; }
   #stage.control .media { touch-action:none; cursor:default; }
   #overlay { position:absolute; inset:0; display:grid; place-items:center; padding:16px; text-align:center;
@@ -310,6 +310,7 @@ let controlOn = false;
 const video = $("video"), img = $("screen"), stage = $("stage");
 
 function closePeer() {
+  resetZoom();
   const p = pc, e = es;
   pc = es = dc = filesDc = null;
   caps = null;
@@ -727,8 +728,8 @@ const click = (p, b = 0) => { cursor = { x: p.x, y: p.y }; send({ t: "md", b, x:
 
 // --- 滑鼠 (桌機) ---
 stage.addEventListener("pointerdown", e => {
-  if (!controlOn) return;
   if (e.pointerType === "touch") return touchDown(e);
+  if (!controlOn) return;
   const p = toRemote(e);
   if (!p || !p.inside) return;
   e.preventDefault();
@@ -738,20 +739,20 @@ stage.addEventListener("pointerdown", e => {
   send({ t: "md", b: e.button, x: p.x, y: p.y });
 });
 stage.addEventListener("pointermove", e => {
-  if (!controlOn) return;
   if (e.pointerType === "touch") return touchMove(e);
+  if (!controlOn) return;
   const p = toRemote(e);
   if (p && (p.inside || stage.hasPointerCapture(e.pointerId))) queueMove(p);
 });
 stage.addEventListener("pointerup", e => {
-  if (!controlOn) return;
   if (e.pointerType === "touch") return touchUp(e);
+  if (!controlOn) return;
   const p = toRemote(e);
   if (!p) return;
   flushMove();
   send({ t: "mu", b: e.button, x: p.x, y: p.y });
 });
-stage.addEventListener("pointercancel", e => { if (controlOn && e.pointerType === "touch") touchCancel(e); });
+stage.addEventListener("pointercancel", e => { if (e.pointerType === "touch") touchCancel(e); });
 stage.addEventListener("contextmenu", e => { if (controlOn) e.preventDefault(); });
 stage.addEventListener("mousedown", e => { if (controlOn && e.button === 1) e.preventDefault(); });   // 中鍵不要變成瀏覽器的自動捲動
 let wheelAcc = { x: 0, y: 0 };
@@ -764,7 +765,8 @@ stage.addEventListener("wheel", e => {
   if (dy || dx) { send({ t: "wh", dx, dy }); wheelAcc.x -= dx; wheelAcc.y -= dy; }
 }, { passive: false });
 
-// --- 觸控 (手機)：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、一指滑動 = 移動游標、兩指滑動 = 捲動 ---
+// --- 觸控 (手機)：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、一指滑動 = 移動游標、兩指滑動 = 捲動、兩指捏合 = 放大 ---
+// 沒在遙控時：一指拖曳 = 移動 (放大後的) 畫面、兩指捏合 = 放大縮小
 // 兩種移動方式 (選單切換，會記住)：
 // - 絕對座標：點哪裡游標就到哪裡
 // - 相對座標：像筆電的觸控板，手指滑多少游標就移多少 (滑得快移得多)，點一下 / 長按都在游標目前的位置
@@ -773,9 +775,34 @@ touchMode.value = store.get("lash-touch", "abs");
 if (!touchMode.value) touchMode.value = "abs";
 const relative = () => touchMode.value === "rel";
 const touchHelp = () => relative()
-  ? "遙控中 (相對座標)：一指滑動 = 移動游標、點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動"
-  : "遙控中：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動";
+  ? "遙控中 (相對座標)：一指滑動 = 移動游標 (放大時畫面跟著游標走)、點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動、兩指捏合 = 放大縮小"
+  : "遙控中：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動、兩指捏合 = 放大縮小";
 touchMode.onchange = () => { store.set("lash-touch", touchMode.value); if (controlOn) toast(touchHelp(), 5000); };
+
+// --- 兩指捏合放大 (遙控中的觸控；瀏覽器自己的放大在遙控中是關掉的)：跟 Google 遠端桌面一樣，
+// 放大後畫面比螢幕大、可以捲動，相對座標移動游標時畫面跟著游標走 (moveCursor)，絕對座標點到哪就是哪 ---
+const ZOOM_MAX = 5;
+let zoom = 1, zoomBase = null;   // zoomBase = 還沒放大時電腦畫面顯示的大小 (shown() 的寬高)
+
+// 放大成 z 倍，並捲動到讓電腦畫面上的 anchor (0~1 的比例) 剛好在螢幕上的 at (clientX / Y)
+function setZoom(z, anchor, at) {
+  const el = media();
+  if (!zoomBase) { const s = shown(); if (!s) return; zoomBase = { w: s.w, h: s.h }; }
+  z = Math.min(ZOOM_MAX, Math.max(1, z));
+  if (z < 1.03) { resetZoom(); return; }
+  zoom = z;
+  Object.assign(el.style, { width: zoomBase.w * z + "px", height: zoomBase.h * z + "px", maxWidth: "none", maxHeight: "none", flex: "none", objectFit: "fill" });
+  const s = shown();
+  if (!s) return;
+  stage.scrollLeft += s.left + anchor.x * s.w - at.x;
+  stage.scrollTop += s.top + anchor.y * s.h - at.y;
+}
+function resetZoom() {
+  zoom = 1; zoomBase = null;
+  for (const el of [video, img]) for (const k of ["width", "height", "maxWidth", "maxHeight", "flex", "objectFit"]) el.style[k] = "";
+}
+window.addEventListener("resize", () => { if (zoom !== 1) resetZoom(); });   // 轉向 / 視窗大小變了：原本放大前的大小不準了
+function spread() { const [a, b] = [...touches.values()]; return a && b ? Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) : 0; }
 
 // 相對座標：手指在畫面上移動 (dx, dy) → 游標移動；游標跑到看不到的地方就捲動畫面跟過去
 function moveCursor(dx, dy) {
@@ -799,6 +826,12 @@ function midpoint() {
 function touchDown(e) {
   e.preventDefault();
   touches.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+  if (!controlOn) {
+    if (gesture) clearTimeout(gesture.timer);
+    gesture = touches.size === 1 ? { kind: "pan", last: { x: e.clientX, y: e.clientY } }
+            : touches.size === 2 ? { kind: "two", view: true, mid: midpoint(), dist: spread() } : gesture;
+    return;
+  }
   if (touches.size === 1) {
     const p = relative() ? { ...cursor } : toRemote(e);
     if (!p) return;
@@ -811,7 +844,7 @@ function touchDown(e) {
     }, 500);
   } else if (touches.size === 2 && gesture && (gesture.kind === "tap" || gesture.kind === "move")) {
     clearTimeout(gesture.timer);
-    gesture = { kind: "two", p: gesture.p, t0: Date.now(), mid: midpoint(), acc: 0 };
+    gesture = { kind: "two", p: gesture.p, t0: Date.now(), mid: midpoint(), acc: 0, dist: spread() };
   }
 }
 function touchMove(e) {
@@ -819,9 +852,28 @@ function touchMove(e) {
   e.preventDefault();
   touches.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
   if (!gesture) return;
-  if (gesture.kind === "two" || gesture.kind === "scroll") {
+  if (gesture.kind === "pan") {   // 沒在遙控：一指拖曳移動畫面
+    stage.scrollLeft -= e.clientX - gesture.last.x;
+    stage.scrollTop -= e.clientY - gesture.last.y;
+    gesture.last = { x: e.clientX, y: e.clientY };
+    return;
+  }
+  if (gesture.kind === "two" || gesture.kind === "scroll" || gesture.kind === "pinch") {
     if (touches.size < 2) return;
     const m = midpoint(), d = m.y - gesture.mid.y;
+    // 兩指距離變了 = 捏合放大縮小 (手指中間那一點固定在手指中間，捏的同時也能移動畫面)；距離差不多、一起上下滑 = 捲動
+    if (gesture.kind === "two" && Math.abs(spread() - gesture.dist) > 24) {
+      const s = shown();
+      if (!s) return;
+      gesture.kind = "pinch";
+      gesture.zoom0 = zoom; gesture.dist = spread();
+      gesture.anchor = { x: (m.x - s.left) / s.w, y: (m.y - s.top) / s.h };
+    }
+    if (gesture.kind === "pinch") { setZoom(gesture.zoom0 * spread() / gesture.dist, gesture.anchor, m); return; }
+    if (gesture.view) {   // 沒在遙控：兩指一起移動 = 移動畫面
+      stage.scrollLeft -= m.x - gesture.mid.x; stage.scrollTop -= m.y - gesture.mid.y; gesture.mid = m;
+      return;
+    }
     if (gesture.kind === "two" && Math.abs(d) < 8) return;
     gesture.kind = "scroll";
     gesture.acc += d * 4; gesture.mid = m;
@@ -848,6 +900,12 @@ function touchUp(e) {
   if (!touches.delete(e.pointerId) || !gesture) return;
   e.preventDefault();
   const g = gesture;
+  if (!controlOn || g.kind === "pan" || g.view) {
+    // 放開一指、還剩一指：接著用那一指移動畫面
+    const rest = [...touches.values()][0];
+    gesture = touches.size === 1 && !controlOn ? { kind: "pan", last: { x: rest.clientX, y: rest.clientY } } : touches.size ? g : null;
+    return;
+  }
   if (g.kind === "two") {
     // 兩指一起點一下 (沒有滑動) = 右鍵
     if (touches.size === 0 && Date.now() - g.t0 < 400) click(g.p, 2);
@@ -868,6 +926,7 @@ function touchUp(e) {
 }
 function touchCancel(e) {
   touches.delete(e.pointerId);
+  if (gesture && (gesture.kind === "pan" || gesture.view)) { if (touches.size === 0) gesture = null; return; }
   if (gesture && gesture.kind === "drag") send({ t: "mu", b: 0, x: gesture.p.x, y: gesture.p.y });
   if (gesture) clearTimeout(gesture.timer);
   if (touches.size === 0) gesture = null;
@@ -1099,7 +1158,7 @@ setBar(store.get("lash-bar", "1") !== "0");
 
 const fit = $("fit");
 fit.value = store.get("lash-fit", "width");
-const applyFit = () => { for (const el of [video, img]) { el.classList.remove("width", "fit", "real"); el.classList.add(fit.value); } store.set("lash-fit", fit.value); };
+const applyFit = () => { resetZoom(); for (const el of [video, img]) { el.classList.remove("width", "fit", "real"); el.classList.add(fit.value); } store.set("lash-fit", fit.value); };
 fit.onchange = applyFit;
 applyFit();
 $("quality").onchange = () => {
