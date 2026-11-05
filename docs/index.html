@@ -660,12 +660,14 @@ setInterval(async () => {
 }, 1000);
 
 // 分享端傳來螢幕清單 → 下拉選單；選了就請分享端換螢幕 (記住上次選的)
+// 電腦的螢幕變了 (拔掉 / 接上) 也會再送一次，帶 cur = 電腦端現在看的那個：照著選就好，不要換螢幕、也不要改記住的選擇
 function showScreens(ch, m) {
   const sel = $("screens");
   sel.innerHTML = "";
   for (const s of m.list) sel.add(new Option(`螢幕 ${s.i + 1}${s.primary ? "（主）" : ""}`, s.i));
   const want = store.get("lash-screen", null);
-  const pick = m.list.find(s => String(s.i) === want) || m.list.find(s => s.primary) || m.list[0];
+  const cur = Number.isInteger(m.cur) ? m.list.find(s => s.i === m.cur) : null;
+  const pick = cur || m.list.find(s => String(s.i) === want) || m.list.find(s => s.primary) || m.list[0];
   sel.value = pick.i;
   sel.classList.toggle("hidden", m.list.length < 2);
   const choose = () => {
@@ -673,7 +675,7 @@ function showScreens(ch, m) {
     if (ch.readyState === "open") ch.send(JSON.stringify({ t: "screen", i: Number(sel.value) }));
   };
   sel.onchange = choose;
-  choose();
+  if (!cur) choose();
 }
 
 // ===== 遙控 =====

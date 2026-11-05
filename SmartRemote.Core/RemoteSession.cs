@@ -46,7 +46,7 @@ namespace SmartRemote.Core
         bool video => Video.Negotiated; // 影像軌協商成功 (否則用 JPEG)
         RTCDataChannel main;
         RemoteInput input;
-        List<Native.Monitor> monitors = Native.Monitors();
+        volatile List<Native.Monitor> monitors = Native.Monitors(); // 整份換掉、不改內容 (遙控、訊息的執行緒也在讀)
         volatile int screen = -1, quality = 1, closed;
         volatile bool forceFrame = true;
         volatile bool wantHardware = true; // 觀看頁選的編碼器：true = 優先用顯示卡硬體編碼 (預設)，false = 軟體編碼
@@ -112,28 +112,54 @@ namespace SmartRemote.Core
                 CheckSameComputer();
                 if (Control) input = new RemoteInput(Id, dryRun);
                 SendCaps();
-                // 螢幕清單：{"t":"screens","list":[{"i":0,"w":2560,"h":1440,"primary":true}, ...]}
-                SendJson(w =>
-                {
-                    w.WriteString("t", "screens");
-                    w.WriteStartArray("list");
-                    for (int i = 0; i < monitors.Count; i++)
-                    {
-                        w.WriteStartObject();
-                        w.WriteNumber("i", i);
-                        w.WriteNumber("w", monitors[i].Bounds.Width);
-                        w.WriteNumber("h", monitors[i].Bounds.Height);
-                        w.WriteBoolean("primary", monitors[i].Primary);
-                        w.WriteEndObject();
-                    }
-                    w.WriteEndArray();
-                });
+                SendScreens(-1);
                 if (Control) RemoteClipboard.Watch(onClipboard);
                 Logger.Info($"[遠端畫面] 觀看端 {Id} 開始傳送畫面 ({monitors.Count} 個螢幕，{(video ? "H.264 影像" : "JPEG")}，{(Control ? "可遙控" : "只能看")})");
                 new Thread(SendFrames) { IsBackground = true, Name = "RemoteVideo-" + Id }.Start();
             }
             dc.onopen += Begin;
             if (dc.readyState == RTCDataChannelState.open) Begin();
+        }
+
+        // 螢幕清單：{"t":"screens","list":[{"i":0,"w":2560,"h":1440,"primary":true}, ...]}；
+        // 螢幕有變動時再送一次，cur = 電腦端現在看的是哪一個 (觀看頁照這個選，不要跳到別的螢幕；舊版觀看頁不看)
+        void SendScreens(int cur)
+        {
+            var list = monitors;
+            SendJson(w =>
+            {
+                w.WriteString("t", "screens");
+                w.WriteStartArray("list");
+                for (int i = 0; i < list.Count; i++)
+                {
+                    w.WriteStartObject();
+                    w.WriteNumber("i", i);
+                    w.WriteNumber("w", list[i].Bounds.Width);
+                    w.WriteNumber("h", list[i].Bounds.Height);
+                    w.WriteBoolean("primary", list[i].Primary);
+                    w.WriteEndObject();
+                }
+                w.WriteEndArray();
+                if (cur >= 0) w.WriteNumber("cur", cur);
+            });
+        }
+
+        /// <summary>
+        /// 螢幕拔掉 / 接上 / 進入省電斷線 / 改解析度之後，Windows 給每個螢幕的代號 (HMONITOR) 會換掉，
+        /// 拿舊的代號截圖會一直「找不到這個螢幕對應的顯示卡輸出」。重新列一次，有變就換成新的清單，
+        /// 盡量留在同一個實體螢幕 (位置大小一樣的)，並告訴觀看頁
+        /// </summary>
+        void RefreshMonitors()
+        {
+            var now = Native.Monitors();
+            var old = monitors;
+            if (now.Count == old.Count && now.Zip(old).All(p => p.First == p.Second)) return;
+            Rect was = Monitor().Bounds;
+            int keep = now.FindIndex(m => m.Bounds == was);
+            monitors = now;
+            screen = keep; // 找不到 (那個螢幕不見了) = -1 = 主螢幕
+            Logger.Info($"[遠端畫面] 觀看端 {Id}：螢幕變了 ({old.Count} → {now.Count} 個)，{(keep >= 0 ? $"繼續看螢幕 {keep + 1}" : "改看主螢幕")}");
+            SendScreens(now.IndexOf(Monitor()));
         }
 
         // 能力 (新版觀看頁看這個決定要顯示哪些功能；舊版會忽略)：hw = 這台有顯示卡硬體編碼器，觀看頁才顯示硬體 / 軟體編碼的切換
@@ -226,7 +252,8 @@ namespace SmartRemote.Core
         Native.Monitor Monitor()
         {
             int s = screen;
-            return s >= 0 && s < monitors.Count ? monitors[s] : monitors.FirstOrDefault(x => x.Primary) ?? monitors[0];
+            var list = monitors;
+            return s >= 0 && s < list.Count ? list[s] : list.FirstOrDefault(x => x.Primary) ?? list[0];
         }
 
         // ===== 畫面靜止後補細節 =====
@@ -249,9 +276,10 @@ namespace SmartRemote.Core
         {
             Native.UsePerMonitorDpi();
             ScreenCapture capture = null;
-            int capturedScreen = -2, lastQuality = -1;
+            Native.Monitor captured = null; // 現在截的是哪個螢幕 (比實際的螢幕，不比編號：觀看頁一開始選的「螢幕 1」常常就是預設的主螢幕，不用重開)
+            int lastQuality = -1;
             var clock = Stopwatch.StartNew();
-            long lastSent = -10000;
+            long lastSent = -10000, nextMonitorCheck = 2000;
             uint jpegFrame = 0;
             if (video) new Thread(EncodeFrames) { IsBackground = true, Name = "RemoteEncode-" + Id }.Start();
             try
@@ -259,16 +287,22 @@ namespace SmartRemote.Core
                 while (closed == 0 && main.readyState == RTCDataChannelState.open)
                 {
                     Quality q = CurrentQuality(quality);
+                    // 每 2 秒看一次螢幕有沒有變 (拔掉 / 接上 / 省電斷線)：變了下面就會換成新的螢幕重新截
+                    if (clock.ElapsedMilliseconds >= nextMonitorCheck)
+                    {
+                        nextMonitorCheck = clock.ElapsedMilliseconds + 2000;
+                        RefreshMonitors();
+                    }
                     int frameMs = video ? 1000 / q.Fps : q.JpegMs;
                     long wait = lastSent + frameMs - clock.ElapsedMilliseconds;
                     Native.PreciseSleep((int)wait);
 
-                    int s = screen;
-                    if (s != capturedScreen)
+                    var mon = Monitor();
+                    if (mon != captured)
                     {
                         capture?.Dispose();
-                        capture = new ScreenCapture(Monitor());
-                        capturedScreen = s;
+                        capture = new ScreenCapture(mon);
+                        captured = mon;
                         forceFrame = true;
                     }
                     // 畫面沒變就不送；但每秒至少送一張 (掉封包後補回來、剛換畫質)，剛變完的那一陣子也繼續送 (補細節，見 refineUntil)
