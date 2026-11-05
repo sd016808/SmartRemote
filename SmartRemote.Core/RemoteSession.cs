@@ -28,7 +28,7 @@ namespace SmartRemote.Core
 
         // 自動畫質 (觀看頁的 quality = 3)：觀看頁看網路狀況送來碼率 ({"t":"rate","b":...})，解析度跟張數跟著碼率走。
         // 碼率低時縮小畫面 (同樣碼率，畫面小一點反而清楚)；很低時改每秒 30 張
-        const int AutoQuality = 3, AutoMinBitrate = 500_000, AutoMaxBitrate = 20_000_000;
+        const int AutoQuality = 3, AutoMinBitrate = 500_000, AutoMaxBitrate = 40_000_000; // 上限 40 Mbps：觀看頁在區網 (來回時間很短) 才會要到 20 以上
         static readonly int[] AutoWidths = { 1280, 1920, int.MaxValue };
         static readonly int[] AutoDown = { 0, 2_500_000, 6_000_000 }; // 碼率低於這個就降一級解析度
         static readonly int[] AutoUp = { 0, 3_500_000, 9_000_000 };   // 碼率到這個才升一級 (跟 AutoDown 錯開，避免來回切)
@@ -98,7 +98,7 @@ namespace SmartRemote.Core
 
         /// <summary>
         /// 觀看端的連線碼有影像軌而且有 H.264 (packetization-mode=1) 就加上送出的影像軌；要在 setRemoteDescription 之前呼叫。
-        /// 優先 Constrained Baseline (42e01f)，瀏覽器都能硬體 / 軟體解碼
+        /// 優先 High profile (64xxxx：Chrome、Edge、Safari 都有提供)，同樣流量畫質比較好；沒有才用 Constrained Baseline (42e01f)
         /// </summary>
         public void AddVideoTrack(string offerSdp)
         {
@@ -112,9 +112,11 @@ namespace SmartRemote.Core
                 else if (line.StartsWith("a=fmtp:") && int.TryParse(line[7..line.IndexOf(' ')], out int pt)) fmtp[pt] = line[(line.IndexOf(' ') + 1)..];
                 else if (line.StartsWith("a=extmap:") && line.EndsWith(" " + PlayoutDelayUri) && int.TryParse(line[9..line.IndexOf(' ')], out int id)) playoutDelayId = id;
             }
-            var candidates = rtpmap.Keys.Where(pt => fmtp.TryGetValue(pt, out string f) && f.Contains("packetization-mode=1") && f.Contains("profile-level-id=42")).ToList();
+            static int Rank(string f) => f.Contains("profile-level-id=640c") || f.Contains("profile-level-id=6400") ? 0 : f.Contains("profile-level-id=42e0") ? 1 : f.Contains("profile-level-id=42") ? 2 : 9;
+            var candidates = rtpmap.Keys.Where(pt => fmtp.TryGetValue(pt, out string f) && f.Contains("packetization-mode=1") && Rank(f) < 9).ToList();
             if (candidates.Count == 0) return;
-            int best = candidates.OrderBy(pt => fmtp[pt].Contains("profile-level-id=42e0") ? 0 : 1).First();
+            int best = candidates.OrderBy(pt => Rank(fmtp[pt])).First();
+            highProfile = Rank(fmtp[best]) == 0;
             pc.addTrack(new MediaStreamTrack(new VideoFormat(VideoCodecsEnum.H264, best, 90000, fmtp[best]), MediaStreamStatusEnum.SendOnly));
             video = true;
             videoPayloadType = best;
@@ -305,6 +307,16 @@ namespace SmartRemote.Core
             return s >= 0 && s < monitors.Count ? monitors[s] : monitors.FirstOrDefault(x => x.Primary) ?? monitors[0];
         }
 
+        // ===== 畫面靜止後補細節 =====
+        // 為了延遲低，畫面一變只送一張、而且大小有限制，那一張是糊的 (2560x1440 的桌面實測 PSNR 27 dB)；
+        // 以前畫面不再變就不送了，所以會一直停在糊的那張 (靜止時字糊的主要原因)。
+        // 現在畫面變完之後繼續把同一張送給編碼器，讓它把細節補上去 (實測 1 秒內到 36 dB 以上)；
+        // 補到編碼器沒東西可補 (連續 3 張都很小) 或超過 RefineMs 就停
+        const int RefineMs = 3000, RefineDoneBytes = 1500;
+        long refineUntil; // 補到什麼時候 (Environment.TickCount64)
+        long changedAt;   // 畫面最近一次真的有變的時間
+        long refineDone;  // 哪一次變化 (changedAt 的值) 已經補完了
+
         // ===== 畫面 =====
         // 截圖跟編碼分兩條執行緒：截下一張的同時編碼上一張 (單條執行緒 2560x1440 只有約 40 張/秒，分開後才到得了 60)。
         // 編碼跟不上時只編最新的一張，舊的直接丟掉，不會越積越慢
@@ -337,10 +349,17 @@ namespace SmartRemote.Core
                         capturedScreen = s;
                         forceFrame = true;
                     }
-                    // 畫面沒變就不送；但每秒至少送一張 (掉封包後補回來、剛換畫質)
-                    bool force = forceFrame || clock.ElapsedMilliseconds - lastSent >= 1000 || lastQuality != quality;
+                    // 畫面沒變就不送；但每秒至少送一張 (掉封包後補回來、剛換畫質)，剛變完的那一陣子也繼續送 (補細節，見 refineUntil)
                     long g0 = clock.ElapsedMilliseconds;
-                    Mat img = capture.Grab(force ? 50 : 200, force);
+                    bool refining = video && Environment.TickCount64 < Volatile.Read(ref refineUntil) && Volatile.Read(ref refineDone) != Volatile.Read(ref changedAt);
+                    bool force = forceFrame || g0 - lastSent >= 1000 || lastQuality != quality || refining;
+                    Mat img = capture.Grab(force ? (refining ? 8 : 50) : 200, force);
+                    if (capture.Changed)
+                    {
+                        long t = Environment.TickCount64;
+                        Volatile.Write(ref changedAt, t); // 要在交給編碼執行緒之前寫
+                        Volatile.Write(ref refineUntil, t + RefineMs);
+                    }
                     if ((capture.Problem ?? baseNote) != note)
                     {
                         note = capture.Problem ?? baseNote;
@@ -380,8 +399,8 @@ namespace SmartRemote.Core
         // 建立編碼器，告訴觀看頁實際用的是哪個 (選硬體但這台不能用時會是軟體)
         H264Encoder NewEncoder(int w, int h, Quality q, bool hardware)
         {
-            var encoder = H264Encoder.Create(w, h, q.Fps, q.Bitrate, hardware);
-            Logger.Info($"[遠端畫面] 觀看端 {Id} 用 {encoder.Name} 編碼 ({w}x{h})");
+            var encoder = H264Encoder.Create(w, h, q.Fps, q.Bitrate, hardware, highProfile);
+            Logger.Info($"[遠端畫面] 觀看端 {Id} 用 {encoder.Name} 編碼 ({w}x{h}，{(encoder.Profile == 100 ? "High" : "Baseline")} profile)");
             SendJson(wr => { wr.WriteString("t", "encoder"); wr.WriteBoolean("hw", encoder.Hardware); wr.WriteString("name", encoder.Name); });
             return encoder;
         }
@@ -392,7 +411,8 @@ namespace SmartRemote.Core
             int encodedQuality = -1;
             bool encodedHardware = true; // 建立目前編碼器時觀看頁選的 (硬體建不起來時實際上是軟體，但不要每張都重試)
             var clock = Stopwatch.StartNew();
-            long lastStamp = 0;
+            long lastStamp = 0, smallChange = 0;
+            int smallFrames = 0;
             try
             {
                 while (closed == 0)
@@ -400,6 +420,7 @@ namespace SmartRemote.Core
                     if (!frameReady.WaitOne(500)) continue;
                     Mat img = Interlocked.Exchange(ref pending, null);
                     if (img == null) continue;
+                    long change = Volatile.Read(ref changedAt); // 這張是哪一次變化之後的
                     using var lease = FramePool.ReturnLater(img); // 用完還回去給下一張用，不重新配置記憶體
                     int qi = quality;
                     Quality q = CurrentQuality(qi);
@@ -438,6 +459,12 @@ namespace SmartRemote.Core
                         au = encoder.Encode(small ?? img, true, duration * 10000);
                     }
                     if (au != null) SendH264(au, (uint)(clock.ElapsedTicks * 90000 / Stopwatch.Frequency));
+                    // 補細節補完了沒：同一次變化之後連續 3 張都很小 = 編碼器沒東西可補了
+                    if (au != null)
+                    {
+                        if (change != smallChange || au.Length >= RefineDoneBytes) { smallChange = change; smallFrames = 0; }
+                        if (au.Length < RefineDoneBytes && ++smallFrames >= 3) Volatile.Write(ref refineDone, change);
+                    }
                     lastStamp = now;
                 }
             }
@@ -458,6 +485,7 @@ namespace SmartRemote.Core
         // 不用 pc.SendVideo：它的戳記是「送完這張才加上這張的長度」，等於每張都蓋上一張的時間。畫面一直在動時沒差；
         // 靜止 (每秒 1 張) 後開始動，戳記會比實際早將近 1 秒，瀏覽器以為畫面來早了就壓著晚點才顯示 (實測多 100 ms 左右)
         int videoPayloadType;
+        bool highProfile; // 協商到 High profile
         const int RtpPayloadBytes = 1200;
         const string TransportCcUri = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
 

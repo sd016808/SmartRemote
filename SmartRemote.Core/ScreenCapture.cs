@@ -36,6 +36,9 @@ namespace SmartRemote.Core
 
         public bool UsingGdi => useGdi;
 
+        /// <summary>最近一次 Grab 回傳的畫面是因為畫面 (或游標) 真的有變，不是 force 補送的。GDI 截圖分不出來，一律是 false</summary>
+        public bool Changed { get; private set; }
+
         public ScreenCapture(Native.Monitor monitor)
         {
             this.monitor = monitor;
@@ -61,6 +64,7 @@ namespace SmartRemote.Core
         /// </summary>
         public Mat Grab(int timeoutMs, bool force)
         {
+            Changed = false;
             if (useGdi)
             {
                 Thread.Sleep(timeoutMs);
@@ -110,6 +114,7 @@ namespace SmartRemote.Core
                 nextRetryAt = 0;
                 return force ? Compose() : null;
             }
+            Changed = changed;
             return changed || force ? Compose() : null;
         }
 

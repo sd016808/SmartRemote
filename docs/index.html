@@ -367,16 +367,19 @@ function send(obj) { if (dc && dc.readyState === "open") dc.send(JSON.stringify(
 //   降到實際收得到的量的八成 (塞車時收得到的量 ≈ 網路的上限)，一次最多降一半
 // - 記住這個上限 (收得到的量的九成)：之後只升到這裡，不再一路加到塞車、砍半、再加到塞車 (手機網路上每一輪都會卡好幾秒)。
 //   20 秒都沒塞車才再往上試，每秒只加 5%，一有排隊就退回來
-// - 畫面真的把流量用滿 (八成以上) 才升：沒用滿的時候升了也測不出網路撐不撐得住，一動起來才塞爆
+// - 畫面真的把流量用滿 (八成以上) 才升：沒用滿的時候升了也測不出網路撐不撐得住，一動起來才塞爆。
+//   但用滿過而且沒事的碼率 (autoProven) 是確定撐得住的：被誤判降下來之後，沒用滿也會自己升回去
+// - 區網 (來回時間不到 20 ms)：網路很寬，一開始就用 20 Mbps、上限 40 Mbps；塞車的判斷照舊，無線網路不夠力一樣會降
 const AUTO_MIN = 500000, AUTO_MAX = 20000000, AUTO_START = 10000000, AUTO_HOLD_MS = 20000;
-let autoRate = AUTO_START, autoSent = 0, autoDownAt = 0, autoCeil = 0, autoCeilAt = 0, recvRate = 0, lastLoss = null, lossRate = 0;
+const FAST_RTT_MS = 20, FAST_MAX = 40000000, FAST_START = 20000000;
+let autoRate = AUTO_START, autoSent = 0, autoDownAt = 0, autoCeil = 0, autoCeilAt = 0, autoProven = 0, autoFast = false, recvRate = 0, lastLoss = null, lossRate = 0;
 let pings = [];   // 最近 30 秒的來回時間 [{at, ms}]
 const autoOn = () => !!(caps && caps.video && caps.auto) && $("quality").value === "3";
 
-function resetAuto() { autoRate = AUTO_START; autoSent = 0; autoDownAt = autoCeil = autoCeilAt = recvRate = 0; lastLoss = null; lossRate = 0; pings = []; }
+function resetAuto() { autoRate = AUTO_START; autoSent = 0; autoDownAt = autoCeil = autoCeilAt = autoProven = recvRate = 0; autoFast = false; lastLoss = null; lossRate = 0; pings = []; }
 
 function setAutoRate(b, force) {
-  autoRate = Math.round(Math.min(AUTO_MAX, Math.max(AUTO_MIN, b)));
+  autoRate = Math.round(Math.min(autoFast ? FAST_MAX : AUTO_MAX, Math.max(AUTO_MIN, b)));
   if (force || Math.abs(autoRate - autoSent) >= autoSent * 0.05) { autoSent = autoRate; send({ t: "rate", b: autoRate }); }
 }
 
@@ -401,6 +404,7 @@ function autoCheck() {
   if (recvRate < autoRate * 0.3) return;   // 畫面幾乎沒在送：不是我們塞的，降了也沒用
   const got = Math.min(autoRate, Math.max(recvRate, autoRate * 0.5));
   autoCeil = got * 0.9;
+  if (recvRate >= autoRate * 0.8) autoProven = Math.min(autoProven, autoCeil);   // 流量用滿了還塞：這個碼率真的撐不住
   autoCeilAt = autoDownAt = now;
   setAutoRate(Math.max(autoRate * 0.5, got * 0.8));
 }
@@ -408,9 +412,20 @@ function autoCheck() {
 // 每秒一次：recvBps = 這一秒實際收到的量
 function autoTick(recvBps) {
   recvRate = recvBps;
+  // 區網：一知道來回時間很短就直接用高碼率 (還沒塞過車才這樣)
+  if (!autoFast && autoOn() && pings.length >= 4 && rttBase() < FAST_RTT_MS) {
+    autoFast = true;
+    if (!autoCeil && autoRate < FAST_START) setAutoRate(FAST_START);
+  }
   autoCheck();
   const now = Date.now();
-  if (queuedMs() > 30 || lossRate > 0.05 || now - autoDownAt < 3000 || recvBps < autoRate * 0.8) return;
+  if (queuedMs() > 30 || lossRate > 0.05 || now - autoDownAt < 3000) return;
+  if (recvBps < autoRate * 0.8) {
+    // 沒用滿：只升回確定撐得住的碼率 (之前是被誤判才降的)
+    if (now - autoDownAt > AUTO_HOLD_MS && autoRate < autoProven) { autoCeil = Math.max(autoCeil, autoProven); setAutoRate(Math.min(autoProven, autoRate * 1.25)); }
+    return;
+  }
+  autoProven = Math.max(autoProven, autoRate);
   let next = autoRate * 1.25;
   if (autoCeil) {
     if (autoRate < autoCeil) next = Math.min(next, autoCeil);   // 上限以下：很快升回來
@@ -421,6 +436,15 @@ function autoTick(recvBps) {
 }
 
 setInterval(() => { if (caps && caps.auto) send({ t: "ping", ts: performance.now() }); }, 250);
+
+// 來回時間是在這一頁量的：這一頁自己忙不過來 (裝置慢、分頁在背景) 的時候，回應晚處理會被當成網路慢、誤判成塞車。
+// 所以盯著計時器準不準：晚了 25 ms 以上，前後 0.3 秒量到的來回時間都不算
+let busyUntil = 0, busyTick = performance.now();
+setInterval(() => {
+  const now = performance.now();
+  if (now - busyTick > 75) busyUntil = now + 300;
+  busyTick = now;
+}, 50);
 
 // ===== 連線 =====
 async function connect(room, pass, attempt = 1) {
@@ -564,6 +588,7 @@ function onText(ch, m) {
       if (m.control && store.get("lash-control", "0") === "1") setControl(true, true);
       break;
     case "pong":
+      if (performance.now() < busyUntil || performance.now() - busyTick > 75) break;   // 這一頁剛剛卡住 (或現在還卡著)，量到的不準
       pings.push({ at: Date.now(), ms: performance.now() - m.ts });
       while (pings.length && Date.now() - pings[0].at > 30000) pings.shift();
       autoCheck();

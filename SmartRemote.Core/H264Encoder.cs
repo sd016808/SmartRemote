@@ -9,7 +9,7 @@ namespace SmartRemote.Core
     /// H.264 編碼 (Windows 內建 Media Foundation，不用另外帶 dll)：BGRA 畫面 → H.264 (Annex B，給 WebRTC 的影像軌)。
     /// 用 Create 建立：優先用顯示卡的硬體編碼器 (NVIDIA NVENC / Intel Quick Sync / AMD AMF，由顯示卡驅動程式提供)，
     /// 沒有或建立失敗就用 Windows 內建的軟體編碼器。
-    /// 用 Constrained Baseline、低延遲模式 (一張進一張出，沒有 B 畫格)，瀏覽器都能解。
+    /// 低延遲模式 (一張進一張出，沒有 B 畫格)；觀看端支援就用 High profile (同樣流量畫質比較好)，不然用 Constrained Baseline (瀏覽器都能解)。
     /// Windows N 版沒有裝媒體功能套件時建立會失敗，呼叫端改用 JPEG
     /// </summary>
     sealed unsafe class H264Encoder : IDisposable
@@ -21,6 +21,8 @@ namespace SmartRemote.Core
         public string Name { get; }
         public int Fps { get; }
         public int Bitrate { get; private set; }
+        /// <summary>實際用的 profile：100 = High、66 / 256 = Baseline / Constrained Baseline</summary>
+        public uint Profile { get; }
 
         IntPtr activate, transform, codecApi, events, outSample, outBuffer;
         uint inStream, outStream;
@@ -51,10 +53,15 @@ namespace SmartRemote.Core
         static readonly Guid MF_MT_DEFAULT_STRIDE = new("644b4e48-1e02-4516-b0eb-c01ca9d49ac6");
         static readonly Guid MF_MT_AVG_BITRATE = new("20332624-fb0d-4d9e-bd0d-cbf6786c102e");
         static readonly Guid MF_MT_MPEG2_PROFILE = new("ad76a80b-2d5c-4e0b-b375-64e520137036");
+        static readonly Guid MF_MT_VIDEO_PRIMARIES = new("dbfbe4d7-0740-4ee0-8192-850ab0e21935");
+        static readonly Guid MF_MT_TRANSFER_FUNCTION = new("5fb0fce9-be5c-4935-a811-ec838f8eed93");
+        static readonly Guid MF_MT_YUV_MATRIX = new("3e23d450-2c75-4d25-a00e-b91670d12327");
+        static readonly Guid MF_MT_VIDEO_NOMINAL_RANGE = new("c21b8ee5-b956-4071-8daf-325edf5cab11");
         static readonly Guid MF_LOW_LATENCY = new("9c27891a-ed7a-40e1-88e8-b22727a024ee"); // 也是 CODECAPI_AVLowLatencyMode
         static readonly Guid CODECAPI_AVEncCommonRateControlMode = new("1c0608e9-370c-4710-8a58-cb6181c42423");
         static readonly Guid CODECAPI_AVEncCommonMeanBitRate = new("f7222374-2144-4815-b550-a37f8e12ee52");
         static readonly Guid CODECAPI_AVEncMPVGOPSize = new("95f31b26-95a4-41aa-9303-246a7fc6eef1");
+        static readonly Guid CODECAPI_AVEncMPVDefaultBPictureCount = new("8d390aac-dc5c-4200-b57f-814d04babab2");
         static readonly Guid CODECAPI_AVEncCommonBufferSize = new("0db96574-b6a4-4c8b-8106-3773de0310cd");
         static readonly Guid CODECAPI_AVEncCommonQualityVsSpeed = new("98332df8-03cd-476b-89fa-3f9e442dec9f");
         static readonly Guid CODECAPI_AVEncVideoForceKeyFrame = new("398c1b98-8353-475a-9ef2-8f265d260345");
@@ -123,7 +130,9 @@ namespace SmartRemote.Core
 
         /// <summary>建立編碼器：hardware = true 先試顯示卡的硬體編碼器 (可能不只一個，例如內顯 + 獨顯，照系統排的順序試)，都不行就用軟體編碼器</summary>
         /// <param name="width">要是偶數</param>
-        public static H264Encoder Create(int width, int height, int fps, int bitrate, bool hardware = true)
+        /// <param name="high">用 High profile (觀看端的連線碼有 High 才可以)；只有硬體編碼器用，編碼器不支援時自動用 Baseline。
+        /// 軟體編碼器一律 Baseline：High 在 CPU 上很吃力 (2560x1440、20 Mbps 實測要 4 個多核心)，畫質只好一點點</param>
+        public static H264Encoder Create(int width, int height, int fps, int bitrate, bool hardware = true, bool high = false)
         {
             if (hardware && !hardwareDisabled)
             {
@@ -140,7 +149,7 @@ namespace SmartRemote.Core
                         string key = $"{i}:{name}";
                         lock (failedHardware)
                             if (failedHardware.Contains(key)) { Native.Release(ref list[i]); continue; }
-                        try { found = new H264Encoder(width, height, fps, bitrate, list[i], name); }
+                        try { found = new H264Encoder(width, height, fps, bitrate, list[i], name, high); }
                         catch (Exception ex)
                         {
                             Logger.Warn($"[遠端畫面] 硬體編碼器 {name} 不能用 (這次執行不再試): {ex.Message}");
@@ -159,7 +168,7 @@ namespace SmartRemote.Core
         public H264Encoder(int width, int height, int fps, int bitrate) : this(width, height, fps, bitrate, IntPtr.Zero, "軟體編碼器") { }
 
         // activate = 硬體編碼器 (MFTEnumEx 列出來的，不管成功失敗都交給這個物件釋放)；IntPtr.Zero = 軟體編碼器
-        H264Encoder(int width, int height, int fps, int bitrate, IntPtr activate, string name)
+        H264Encoder(int width, int height, int fps, int bitrate, IntPtr activate, string name, bool high = false)
         {
             Width = width;
             Height = height;
@@ -216,11 +225,15 @@ namespace SmartRemote.Core
                 SetBufferSize(bitrate);
                 SetCodec(CODECAPI_AVEncCommonQualityVsSpeed, 25); // 偏快 (0 最快、100 最好)
                 SetCodecBool(MF_LOW_LATENCY, true);
+                SetCodec(CODECAPI_AVEncMPVDefaultBPictureCount, 0); // 不要 B 畫格 (要等後面的畫面才能編，會多延遲)；低延遲模式本來就不會用，保險起見
 
-                // 編碼器要先設輸出格式再設輸入格式。Baseline 不收的硬體編碼器改試 Constrained Baseline
+                // 編碼器要先設輸出格式再設輸入格式。
+                // High profile (100) 比 Baseline 多了 CABAC 與 8x8 轉換，同樣流量畫質好一點 (NVIDIA 實測約 +0.3 dB)；不收的編碼器改試 Baseline / Constrained Baseline
                 int hr = 0;
-                foreach (uint profile in Hardware ? new uint[] { 66, 256 } : new uint[] { 66 }) // eAVEncH264VProfile_Base、eAVEncH264VProfile_ConstrainedBase
+                uint[] profiles = high ? new uint[] { 100, 66, 256 } : Hardware ? new uint[] { 66, 256 } : new uint[] { 66 }; // eAVEncH264VProfile_High / _Base / _ConstrainedBase
+                foreach (uint profile in profiles)
                 {
+                    Profile = profile;
                     IntPtr type = NewVideoType(MFVideoFormat_H264, width, height, fps);
                     try
                     {
@@ -526,6 +539,13 @@ namespace SmartRemote.Core
             SetUInt64(type, MF_MT_FRAME_RATE, ((ulong)fps << 32) | 1);
             SetUInt64(type, MF_MT_PIXEL_ASPECT_RATIO, (1UL << 32) | 1);
             SetUInt32(type, MF_MT_INTERLACE_MODE, 2); // 逐行
+            // 標明顏色是怎麼轉的 (編碼器會寫進影像裡)：OpenCV 的 BGRA → YUV 用的是 BT.601 的係數、16 ~ 235 的範圍。
+            // 不標的話瀏覽器看到高畫質的解析度會當成 BT.709 解讀，顏色就偏掉 (純綠變成 0,216,0、純紅變成 255,25,0，最多差 41)；
+            // 標了之後實測最多差 2
+            SetUInt32(type, MF_MT_VIDEO_PRIMARIES, 2);     // MFVideoPrimaries_BT709 (螢幕的 sRGB 就是這組)
+            SetUInt32(type, MF_MT_TRANSFER_FUNCTION, 5);   // MFVideoTransFunc_709
+            SetUInt32(type, MF_MT_YUV_MATRIX, 2);          // MFVideoTransferMatrix_BT601
+            SetUInt32(type, MF_MT_VIDEO_NOMINAL_RANGE, 2); // MFNominalRange_16_235
             return type;
         }
 
