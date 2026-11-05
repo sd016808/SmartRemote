@@ -67,6 +67,7 @@ namespace SmartRemote.Core
                 if (s == RTCPeerConnectionState.connected && connectedAt == null)
                 {
                     connectedAt = DateTime.Now; // 顯示用時間
+                    WatchFeedback();
                     CheckSameComputer();
                     RemoteLog.Write(id, $"連線成功  來源 {Source()}  模式 {(Control ? "可遙控" : "只能看")}");
                     RemoteView.StatusChanged();
@@ -85,11 +86,13 @@ namespace SmartRemote.Core
                 OnMainChannel(dc);
             };
             // 瀏覽器掉封包解不出畫面時會要求關鍵畫格 (PLI / FIR)。
-            // 只認這兩種：PSFB 還有 REMB (瀏覽器每 0.2 秒回報一次頻寬)，當成要求的話每秒會白送 5 張關鍵畫格
+            // 只認這兩種：PSFB 還有 REMB (瀏覽器每 0.2 秒回報一次頻寬)，當成要求的話每秒會白送 5 張關鍵畫格。
+            // 這裡只是備援：SIPSorcery 一個封包只留最後一種回饋，而 Chrome 每個封包最後都帶 REMB，PLI 幾乎都被蓋掉，
+            // 真正在處理的是 WatchFeedback (自己解讀)
             pc.OnReceiveReport += (_, media, report) =>
             {
                 if (media == SDPMediaTypesEnum.video && report.Feedback?.Header is { PacketType: RTCPReportTypesEnum.PSFB, PayloadFeedbackMessageType: PSFBFeedbackTypesEnum.PLI or PSFBFeedbackTypesEnum.FIR })
-                    keyFrameWanted = 1;
+                    WantKeyFrame();
             };
         }
 
@@ -460,14 +463,13 @@ namespace SmartRemote.Core
 
         void SendH264(byte[] au, uint timestamp)
         {
-            var stream = pc.VideoStream;
+            int count = 0;
             foreach (var item in H264Packetiser.ParseNals(au))
             {
                 byte[] nal = item.NAL;
                 if (nal.Length <= RtpPayloadBytes)
                 {
-                    stream.SetRtpHeaderExtensionValue(TransportCcUri, null); // 有協商到才會帶 (封包序號加一)，跟 SendVideo 一樣
-                    stream.SendRtpRaw(nal, timestamp, item.IsLast ? 1 : 0, videoPayloadType);
+                    SendPacket(nal, timestamp, item.IsLast ? 1 : 0, ref count);
                     continue;
                 }
                 // 一個封包放不下：切成 FU-A (第一個位元組是 NAL 標頭，不送，改放在每塊的 FU 標頭裡)
@@ -479,9 +481,110 @@ namespace SmartRemote.Core
                     var packet = new byte[header.Length + len];
                     Buffer.BlockCopy(header, 0, packet, 0, header.Length);
                     Buffer.BlockCopy(nal, offset, packet, header.Length, len);
-                    stream.SetRtpHeaderExtensionValue(TransportCcUri, null);
-                    stream.SendRtpRaw(packet, timestamp, item.IsLast && last ? 1 : 0, videoPayloadType);
+                    SendPacket(packet, timestamp, item.IsLast && last ? 1 : 0, ref count);
                 }
+            }
+        }
+
+        // ===== 掉封包 =====
+        // 最近送出的影像封包留著，瀏覽器說沒收到 (NACK) 就重送同一個；瀏覽器要求關鍵畫格 (PLI / FIR) 就送。
+        // 沒有重送的話掉任何一個封包那張就解不開、後面的也跟著解不開，只能等關鍵畫格；而關鍵畫格有兩三百個封包，
+        // 掉 1% 就幾乎不可能整張到齊，畫面會一直卡住 (實測掉 1% 封包時一張都解不出來)
+        const int SentSize = 2048; // 留最近幾個封包 (2 的次方)；20 Mbps 大約 1 秒
+        const int BurstPackets = 48; // 一口氣最多送幾個封包 (約 58 KB)，超過就停 1 ms 再送
+        readonly (byte[] Payload, uint Timestamp, int Marker, int Seq, long ResentAt)[] sent = new (byte[], uint, int, int, long)[SentSize];
+        readonly object sendLock = new(); // 編碼執行緒在送、收到 NACK 的執行緒要重送
+        int lastSeq = -1;
+        long keyFrameAt;
+
+        void SendPacket(byte[] payload, uint timestamp, int marker, ref int count)
+        {
+            // 一張畫面的封包全部一口氣送出去的話，大的畫面 (關鍵畫格兩三百個封包) 會塞爆對方的接收緩衝區或無線網路，中間掉一段；分批送
+            if (++count % BurstPackets == 0) Native.PreciseSleep(1);
+            var stream = pc.VideoStream;
+            lock (sendLock)
+            {
+                ushort seq = stream.LocalTrack.GetNextSeqNum();
+                sent[seq & (SentSize - 1)] = (payload, timestamp, marker, seq, 0);
+                lastSeq = seq;
+                stream.SetRtpHeaderExtensionValue(TransportCcUri, null); // 有協商到才會帶 (封包序號加一)，跟 SendVideo 一樣
+                stream.SendRtpRaw(payload, timestamp, marker, videoPayloadType, seq);
+            }
+        }
+
+        void Resend(ushort seq)
+        {
+            lock (sendLock)
+            {
+                ref var p = ref sent[seq & (SentSize - 1)];
+                // 序號繞一圈 (65535 → 0) 之前的不重送：SIPSorcery 加密用的圈數是照「送出 65535 就加一」算的，
+                // 重送上一圈的會用錯圈數 (對方解不開)，重送 65535 本身還會讓圈數多加一次、之後全部解不開
+                if (p.Payload == null || p.Seq != seq || seq > lastSeq || seq == ushort.MaxValue) return;
+                long now = Environment.TickCount64;
+                if (now - p.ResentAt < 10) return; // 剛重送過 (同一個要求重複收到)
+                p.ResentAt = now;
+                pc.VideoStream.SendRtpRaw(p.Payload, p.Timestamp, p.Marker, videoPayloadType, seq);
+            }
+        }
+
+        // 關鍵畫格很大，要求太密的話只會塞得更嚴重：最少隔 0.3 秒
+        void WantKeyFrame()
+        {
+            long now = Environment.TickCount64;
+            if (now - Interlocked.Read(ref keyFrameAt) < 300) return;
+            Interlocked.Exchange(ref keyFrameAt, now);
+            keyFrameWanted = 1;
+        }
+
+        /// <summary>
+        /// 自己解讀瀏覽器送來的回饋 (RTCP)。SIPSorcery 解完只留每個封包裡最後一種回饋、NACK 也只讀第一筆，沒辦法用；
+        /// 所以把 SRTCP 的解密函式包一層，解密成功後順便看內容 (SetSecurityContext 是公開的方法，其他三個函式照舊)。
+        /// 收到的 RTCP 用哪一條軌的解密函式要看對方的 SSRC 對到誰，對不到就用第一條 (沒有聲音時也有一條空的聲音軌)，所以每一條都包
+        /// </summary>
+        void WatchFeedback()
+        {
+            if (!video || feedbackWatched) return;
+            var streams = pc.AudioStreamList.Cast<MediaStream>().Concat(pc.VideoStreamList).Concat(pc.TextStreamList).Where(x => x?.GetSecurityContext() != null).ToList();
+            if (streams.Count == 0) return;
+            feedbackWatched = true;
+            foreach (MediaStream stream in streams)
+            {
+                var context = stream.GetSecurityContext();
+                ProtectRtpPacket unprotect = context.UnprotectRtcpPacket;
+                stream.SetSecurityContext(context.ProtectRtpPacket, context.UnprotectRtpPacket, context.ProtectRtcpPacket, (byte[] buffer, int length, out int outLength) =>
+                {
+                    int result = unprotect(buffer, length, out outLength);
+                    if (result == 0)
+                    {
+                        try { OnFeedback(buffer, outLength); }
+                        catch (Exception ex) { Logger.Warn($"[遠端畫面] 觀看端 {Id} 的回饋解讀失敗: {ex.Message}"); }
+                    }
+                    return result;
+                });
+            }
+        }
+
+        bool feedbackWatched;
+
+        // 一個 RTCP 封包裡有好幾段，每段：版本 / 種類 (1 位元組)、型別 (1)、長度 (2，單位 4 位元組再加一段)
+        void OnFeedback(byte[] b, int length)
+        {
+            for (int i = 0; i + 4 <= length;)
+            {
+                int format = b[i] & 0x1F, type = b[i + 1], size = 4 * (((b[i + 2] << 8) | b[i + 3]) + 1);
+                if (b[i] >> 6 != 2 || i + size > length) return;
+                if (type == 206 && (format == 1 || format == 4)) WantKeyFrame(); // PSFB：PLI / FIR
+                else if (type == 205 && format == 1) // RTPFB：NACK，每筆 = 掉的序號 + 後面 16 個哪些也掉了
+                {
+                    for (int j = i + 12; j + 4 <= i + size; j += 4)
+                    {
+                        int first = (b[j] << 8) | b[j + 1], mask = (b[j + 2] << 8) | b[j + 3];
+                        Resend((ushort)first);
+                        for (int k = 0; k < 16; k++)
+                            if ((mask >> k & 1) != 0) Resend((ushort)(first + k + 1));
+                    }
+                }
+                i += size;
             }
         }
 
