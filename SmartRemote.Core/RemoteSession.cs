@@ -350,7 +350,7 @@ namespace SmartRemote.Core
 
                     if (video)
                     {
-                        Interlocked.Exchange(ref pending, img)?.Dispose(); // 交給編碼執行緒
+                        FramePool.Return(Interlocked.Exchange(ref pending, img)); // 交給編碼執行緒 (上一張還沒被拿走就不編了)
                         frameReady.Set();
                         continue;
                     }
@@ -367,6 +367,7 @@ namespace SmartRemote.Core
             finally
             {
                 capture?.Dispose();
+                FramePool.Clear();
             }
             Logger.Info($"[遠端畫面] 觀看端 {Id} 停止傳送");
             Close("停止傳送");
@@ -394,12 +395,19 @@ namespace SmartRemote.Core
                 while (closed == 0)
                 {
                     if (!frameReady.WaitOne(500)) continue;
-                    using Mat img = Interlocked.Exchange(ref pending, null);
+                    Mat img = Interlocked.Exchange(ref pending, null);
                     if (img == null) continue;
+                    using var lease = FramePool.ReturnLater(img); // 用完還回去給下一張用，不重新配置記憶體
                     int qi = quality;
                     Quality q = CurrentQuality(qi);
                     (int w, int h) = VideoSize(img.Width, img.Height, q.MaxWidth);
-                    using Mat small = img.Width == w && img.Height == h ? null : img.Resize(new OpenCvSharp.Size(w, h), 0, 0, InterpolationFlags.Area);
+                    Mat small = null;
+                    if (img.Width != w || img.Height != h)
+                    {
+                        small = FramePool.Rent(h, w, img.Type());
+                        Cv2.Resize(img, small, new OpenCvSharp.Size(w, h), 0, 0, InterpolationFlags.Area);
+                    }
+                    using var smallLease = FramePool.ReturnLater(small);
                     bool hw = wantHardware;
                     bool rebuild = encoder == null || encoder.Width != w || encoder.Height != h || encoder.Fps != q.Fps || encodedQuality != qi || encodedHardware != hw;
                     if (!rebuild && encoder.Bitrate != q.Bitrate) rebuild = !encoder.SetBitrate(q.Bitrate); // 自動畫質改碼率：編碼器不能途中改就重建
@@ -439,6 +447,7 @@ namespace SmartRemote.Core
             {
                 encoder?.Dispose();
                 Interlocked.Exchange(ref pending, null)?.Dispose();
+                FramePool.Clear();
             }
         }
 

@@ -1,5 +1,7 @@
 using OpenCvSharp;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 
 namespace SmartRemote.Core
 {
@@ -298,24 +300,44 @@ namespace SmartRemote.Core
             }
         }
 
-        // BGRA → I420 (軟體) 或 NV12 (硬體：U、V 交錯放在同一個平面)
+        // BGRA → I420 (軟體) 或 NV12 (硬體：U、V 交錯放在同一個平面)。
+        // 直接轉進編碼器的輸入緩衝，不先轉到暫存再搬一次 (2560x1440 每張省 2 ms 左右)
+        byte[] chroma = Array.Empty<byte>(); // NV12 用：U、V 兩個平面的暫存
+
         void FillInput(Mat bgra, byte* dst)
         {
-            using var yuv = new Mat();
-            Cv2.CvtColor(bgra, yuv, ColorConversionCodes.BGRA2YUV_I420);
-            byte* src = (byte*)yuv.Data;
             int ySize = Width * Height, cSize = ySize / 4;
-            if (!nv12)
+            using (var target = Mat.FromPixelData(Height * 3 / 2, Width, MatType.CV_8UC1, (IntPtr)dst))
             {
-                Buffer.MemoryCopy(src, dst, frameSize, frameSize);
-                return;
+                Cv2.CvtColor(bgra, target, ColorConversionCodes.BGRA2YUV_I420);
+                if (target.Data != (IntPtr)dst) // OpenCV 沒有用我們給的記憶體 (大小對就不會發生)：搬過來
+                    Buffer.MemoryCopy((byte*)target.Data, dst, frameSize, frameSize);
             }
-            Buffer.MemoryCopy(src, dst, ySize, ySize);
-            byte* u = src + ySize, v = u + cSize, uv = dst + ySize;
-            for (int i = 0; i < cSize; i++)
+            if (!nv12) return;
+
+            // 現在 Y 後面是 U 平面接 V 平面，NV12 要 U、V 一個一個交錯：先把這兩個平面抄出來再交錯寫回去
+            if (chroma.Length < 2 * cSize) chroma = new byte[2 * cSize];
+            byte* uv = dst + ySize;
+            fixed (byte* u = chroma)
             {
-                uv[2 * i] = u[i];
-                uv[2 * i + 1] = v[i];
+                Buffer.MemoryCopy(uv, u, 2 * cSize, 2 * cSize);
+                byte* v = u + cSize;
+                int i = 0;
+                if (Sse2.IsSupported)
+                {
+                    for (; i + 16 <= cSize; i += 16)
+                    {
+                        var a = Sse2.LoadVector128(u + i);
+                        var b = Sse2.LoadVector128(v + i);
+                        Sse2.Store(uv + 2 * i, Sse2.UnpackLow(a, b));
+                        Sse2.Store(uv + 2 * i + 16, Sse2.UnpackHigh(a, b));
+                    }
+                }
+                for (; i < cSize; i++)
+                {
+                    uv[2 * i] = u[i];
+                    uv[2 * i + 1] = v[i];
+                }
             }
         }
 
@@ -327,17 +349,28 @@ namespace SmartRemote.Core
             Native.Check(ProcessInput(sample), "ProcessInput");
             needInput--;
             inputs++;
-            if (!WaitFor(output, () => outputs >= inputs - lag, 100) && lag < 3)
+            // 等這張編完。系統的計時器最細只到 1 ~ 2 ms，每次都睡的話平均白等 2 ms (2560x1440 實測編碼本身 4 ms，等到的時候已經 6 ms)；
+            // 所以快到平常編完的時間才改成不睡、一直看 (每張 2 ms 左右，畫面在動時多用一成左右的單核 CPU)
+            long start = Stopwatch.GetTimestamp();
+            if (WaitFor(output, () => outputs >= inputs - lag, 100, usualMs - 2.5, usualMs + 3))
+            {
+                double ms = (Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency;
+                usualMs = Math.Min(30, ms < usualMs ? ms : usualMs + (ms - usualMs) * 0.05); // 變快馬上跟，變慢慢慢跟 (睡過頭的那幾次不算數)
+            }
+            else if (lag < 3)
             {
                 lag++;
                 Logger.Info($"[遠端畫面] 硬體編碼器 {Name} 會晚 {lag} 張才輸出");
             }
         }
 
-        // 處理編碼器的事件直到 done 成立或逾時；回傳 done 有沒有成立
-        bool WaitFor(MemoryStream output, Func<bool> done, int timeoutMs)
+        double usualMs = 4; // 硬體編碼器平常多久編完一張
+
+        // 處理編碼器的事件直到 done 成立或逾時；回傳 done 有沒有成立。
+        // 開始後第 spinFromMs ~ spinToMs 毫秒之間不睡、一直看 (預設都用睡的)
+        bool WaitFor(MemoryStream output, Func<bool> done, int timeoutMs, double spinFromMs = double.MaxValue, double spinToMs = 0)
         {
-            long deadline = Environment.TickCount64 + timeoutMs;
+            long start = Stopwatch.GetTimestamp();
             while (true)
             {
                 while (NextEvent(out uint type))
@@ -346,8 +379,10 @@ namespace SmartRemote.Core
                     else if (type == METransformHaveOutput) ReadOutput(output);
                 }
                 if (done()) return true;
-                if (Environment.TickCount64 >= deadline) return false;
-                Native.PreciseSleep(1);
+                double ms = (Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency;
+                if (ms >= timeoutMs) return false;
+                if (ms >= spinFromMs && ms < spinToMs) Thread.SpinWait(30);
+                else Native.PreciseSleep(1);
             }
         }
 

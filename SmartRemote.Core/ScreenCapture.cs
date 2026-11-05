@@ -1,6 +1,7 @@
 
 using OpenCvSharp;
 using OpenCvSharp.Extensions;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace SmartRemote.Core
@@ -19,6 +20,8 @@ namespace SmartRemote.Core
         Mat desktop;                 // 最近一次的桌面畫面 (BGRA，還沒轉正、沒有游標)
         bool useGdi;
         long nextRetryAt;
+        long lastPresent, prevPresent; // 最近兩次桌面畫面更新的時間 (QueryPerformanceCounter，跟 Stopwatch.GetTimestamp 同一個時鐘)
+        long refreshTicks;             // 螢幕更新一次的間隔 (同上的單位)
 
         // 游標：位置是游標圖左上角在這個螢幕裡的座標
         bool cursorVisible;
@@ -82,7 +85,23 @@ namespace SmartRemote.Core
                     return force ? Compose() : null;
                 }
             }
-            try { changed |= Acquire(timeoutMs); }
+            try
+            {
+                changed |= Acquire(timeoutMs, out bool desktopChanged);
+                // 游標在動、畫面本身也正在連續更新 (拖曳視窗、遙控操作時)：只有游標的更新隨時都有，一有就回傳的話截圖的節奏會被游標帶著走、
+                // 跟螢幕更新錯開，畫面內容平均晚半個更新間隔 (60 Hz 約 8 ms)，還不時送出一張只有游標動的畫面。
+                // 所以最近兩次畫面更新是連續的 (正在動) 時，等到下一次畫面更新再一起回傳；最多等到預計的時間再多 3 ms
+                if (changed && !desktopChanged && lastPresent - prevPresent < refreshTicks * 3 / 2)
+                {
+                    long deadline = lastPresent + refreshTicks + Stopwatch.Frequency * 3 / 1000;
+                    while (!desktopChanged)
+                    {
+                        long left = (deadline - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency;
+                        if (left <= 0) break;
+                        Acquire((int)left, out desktopChanged);
+                    }
+                }
+            }
             catch (COMException ex)
             {
                 // DXGI_ERROR_ACCESS_LOST：切到安全桌面、解析度 / 螢幕設定改變、全螢幕程式切換，要重新建立
@@ -158,6 +177,9 @@ namespace SmartRemote.Core
                 width = (int)dd.Width;
                 height = (int)dd.Height;
                 rotation = (int)dd.Rotation;
+                double hz = dd.RefreshDen > 0 ? (double)dd.RefreshNum / dd.RefreshDen : 0;
+                refreshTicks = (long)(Stopwatch.Frequency / (hz is >= 20 and <= 500 ? hz : 60));
+                lastPresent = prevPresent = 0;
 
                 var td = new TextureDesc { Width = dd.Width, Height = dd.Height, MipLevels = 1, ArraySize = 1, Format = 87, SampleCount = 1, Usage = 3, CpuAccess = 0x20000 }; // B8G8R8A8、STAGING、CPU 讀取
                 IntPtr tex;
@@ -178,9 +200,10 @@ namespace SmartRemote.Core
             }
         }
 
-        // 等下一張畫面；回傳 true = 桌面或游標有變
-        bool Acquire(int timeoutMs)
+        // 等下一張畫面；回傳 true = 桌面或游標有變，desktopChanged = 桌面畫面本身有變 (不是只有游標)
+        bool Acquire(int timeoutMs, out bool desktopChanged)
         {
+            desktopChanged = false;
             FrameInfo info;
             IntPtr resource;
             int hr = ((delegate* unmanaged[Stdcall]<IntPtr, uint, FrameInfo*, IntPtr*, int>)Native.Slot(duplication, 8))(duplication, (uint)timeoutMs, &info, &resource);
@@ -190,6 +213,9 @@ namespace SmartRemote.Core
             {
                 if (info.LastPresentTime != 0)
                 {
+                    desktopChanged = true;
+                    prevPresent = lastPresent;
+                    lastPresent = info.LastPresentTime;
                     Native.Check(Native.QueryInterface(resource, IID_ID3D11Texture2D, out IntPtr texture), "ID3D11Texture2D");
                     try { ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, IntPtr, void>)Native.Slot(context, 47))(context, staging, texture); } // CopyResource
                     finally { Native.Release(ref texture); }
@@ -236,7 +262,12 @@ namespace SmartRemote.Core
                 img = new Mat();
                 Cv2.Rotate(desktop, img, rotation == 2 ? RotateFlags.Rotate90Clockwise : rotation == 3 ? RotateFlags.Rotate180 : RotateFlags.Rotate90Counterclockwise);
             }
-            else img = desktop.Clone();
+            else
+            {
+                // 不用 Clone：每張都重新配置 15 MB 的記憶體很慢 (2560x1440 約 5 ms，大部分花在向系統要記憶體)，重複使用的話只要 1 ms
+                img = FramePool.Rent(desktop.Rows, desktop.Cols, desktop.Type());
+                desktop.CopyTo(img);
+            }
             if (cursorVisible && shapeInfo.Type != 0) DrawCursor(img);
             return img;
         }
@@ -313,6 +344,59 @@ namespace SmartRemote.Core
             Close();
             desktop?.Dispose();
             desktop = null;
+        }
+    }
+
+    /// <summary>
+    /// 畫面用的記憶體重複使用 (截圖 → 編碼，一張 2560x1440 的 BGRA 是 15 MB)：用完 Return 而不是 Dispose，下一張 Rent 回來用。
+    /// 大小不合的 (換螢幕、換畫質) 直接丟掉；最多留幾張，所有觀看端共用
+    /// </summary>
+    static class FramePool
+    {
+        const int Max = 4;
+        static readonly Stack<Mat> free = new();
+
+        public static Mat Rent(int rows, int cols, MatType type)
+        {
+            lock (free)
+            {
+                while (free.Count > 0)
+                {
+                    Mat m = free.Pop();
+                    if (m.Rows == rows && m.Cols == cols && m.Type() == type) return m;
+                    m.Dispose();
+                }
+            }
+            return new Mat(rows, cols, type);
+        }
+
+        public static void Return(Mat m)
+        {
+            if (m == null || m.IsDisposed) return;
+            lock (free)
+            {
+                if (free.Count < Max) { free.Push(m); return; }
+            }
+            m.Dispose();
+        }
+
+        /// <summary>離開目前的範圍時還回來：using var lease = FramePool.ReturnLater(mat) (mat 可以是 null)</summary>
+        public static Lease ReturnLater(Mat m) => new Lease(m);
+
+        public readonly struct Lease : IDisposable
+        {
+            readonly Mat mat;
+            public Lease(Mat mat) => this.mat = mat;
+            public void Dispose() => Return(mat);
+        }
+
+        /// <summary>沒有人在看了：把留著的記憶體還給系統</summary>
+        public static void Clear()
+        {
+            lock (free)
+            {
+                while (free.Count > 0) free.Pop().Dispose();
+            }
         }
     }
 }
