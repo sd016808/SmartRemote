@@ -753,6 +753,7 @@ setInterval(async () => {
 // 分享端傳來螢幕清單 → 下拉選單；選了就請分享端換螢幕 (記住上次選的)
 // 電腦的螢幕變了 (拔掉 / 接上) 也會再送一次，帶 cur = 電腦端現在看的那個：照著選就好，不要換螢幕、也不要改記住的選擇
 function showScreens(ch, m) {
+  screenList = m.list;
   const sel = $("screens");
   sel.innerHTML = "";
   for (const s of m.list) sel.add(new Option(`螢幕 ${s.i + 1}${s.primary ? "（主）" : ""}`, s.i));
@@ -905,14 +906,21 @@ window.addEventListener("resize", () => { if (innerWidth !== zoomW) { zoomW = in
 // 像素少了同樣流量畫質也比較好、手機解碼也比較輕。雙指放大也算進去 (放大後要看得到細節)。
 // 原始大小 = 顯示大小跟著影像大小走，不能反過來限制 (會越縮越小)：送 0 = 不限制。
 // 拖拉視窗、手機鍵盤跳出來時大小會一直變，電腦端每換一次都要重建編碼器、重送關鍵畫格：
-// 變大 0.3 秒後才送；變小要差 3% 以上 (捲軸出現 / 不見只差 1% 左右，不用換)、而且 1 秒後才送。
+// 變大 0.3 秒後才送；變小 1 秒後才送 (只小 3% 以內要 3 秒都沒再變)。
 // 寬度要剛好 (不要進位)：差 1% 瀏覽器也得把每個像素重新取樣，一樣會糊。舊版分享端收到會忽略 ---
 let viewSent = -1, viewTimer = 0;   // viewSent：-1 = 這次連線還沒送過，0 = 不限制
+let screenList = [];                // 電腦的螢幕清單 (showScreens)
+const curScreen = () => { const v = Number($("screens").value); return screenList.find(s => s.i === v) || screenList.find(s => s.primary) || screenList[0]; };
 function viewWidth() {
   if (fit.value === "real") return 0;
   const s = shown();
   if (!s) return -1;
-  return Math.round(s.w * (window.devicePixelRatio || 1) / 2) * 2;   // H.264 要偶數
+  let w = s.w;
+  // 整個畫面：用電腦螢幕的長寬比算，不用目前影像的 (電腦端縮完寬高要取偶數，長寬比差一點點，
+  // 算出來的寬度就跟著差 2 像素 → 又重建一次編碼器 → 長寬比又變…，1.3.14 實際看到 2362 ↔ 2364 來回)
+  const src = curScreen();
+  if (fit.value === "fit" && zoom === 1 && src && src.w && src.h) { const r = media().getBoundingClientRect(); w = Math.min(r.width, r.height * src.w / src.h); }
+  return Math.round(w * (window.devicePixelRatio || 1) / 2) * 2;   // H.264 要偶數
 }
 function checkView() {
   clearTimeout(viewTimer); viewTimer = 0;
@@ -922,8 +930,9 @@ function checkView() {
   const go = () => { viewTimer = 0; const now = viewWidth(); if (now < 0 || now === viewSent || !caps) return; viewSent = now; send({ t: "view", w: now }); };
   if (viewSent < 0) return go();   // 剛連上：馬上送
   const cur = viewSent === 0 ? Infinity : viewSent, want = w === 0 ? Infinity : w;
-  if (want < cur && want > cur * 0.97) return;   // 只小一點點：不用換
-  viewTimer = setTimeout(go, want > cur ? 300 : 1000);
+  // 只小一點點 (3% 以內，例如捲軸出現)：等 3 秒都沒再變才換 (差一點點瀏覽器也要整張重新取樣，字會糊；
+  // 一直在變的話 (捲軸一下有一下沒有) 每次都重新計時，就不會一直重建)
+  viewTimer = setTimeout(go, want > cur ? 300 : want < cur * 0.97 ? 1000 : 3000);
 }
 const viewWatch = new ResizeObserver(() => checkView());
 for (const el of [video, img, stage]) viewWatch.observe(el);

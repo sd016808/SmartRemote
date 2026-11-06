@@ -353,7 +353,8 @@ namespace SmartRemote.Core
                     using (img)
                     {
                         (int w, int h) = VideoSize(img.Width, img.Height, MaxWidth(q, img.Width));
-                        using Mat small = img.Width == w && img.Height == h ? img.Clone() : img.Resize(new OpenCvSharp.Size(w, h), 0, 0, InterpolationFlags.Area);
+                        using Mat small = img.Width == w && img.Height == h ? img.Clone() : new Mat(h, w, img.Type());
+                        if (img.Width != w || img.Height != h) Downscale(img, small, new OpenCvSharp.Size(w, h));
                         // 還沒送完的太多 (網路慢) 就跳過這張
                         if (main.bufferedAmount < 2 * 1024 * 1024) SendJpeg(small, q.JpegQuality, jpegFrame++);
                     }
@@ -403,7 +404,7 @@ namespace SmartRemote.Core
                     if (img.Width != w || img.Height != h)
                     {
                         small = FramePool.Rent(h, w, img.Type());
-                        Cv2.Resize(img, small, new OpenCvSharp.Size(w, h), 0, 0, InterpolationFlags.Area);
+                        Downscale(img, small, new OpenCvSharp.Size(w, h));
                     }
                     using var smallLease = FramePool.ReturnLater(small);
                     bool hw = wantHardware;
@@ -453,6 +454,30 @@ namespace SmartRemote.Core
                 Interlocked.Exchange(ref pending, null)?.Dispose();
                 FramePool.Clear();
             }
+        }
+
+        /// <summary>
+        /// 縮小畫面 (dst 要先配置好 size 的大小)：用雙三次，字的筆畫比較銳利。
+        /// 以前用面積平均：0.7 ~ 0.9 倍時比瀏覽器的雙線性還軟 (1.3.14 實測字比 Google 遠端桌面糊，銳利度 58 對 70；雙三次 80)，
+        /// 而且慢 (2560x1440 → 1960 要 9 ms，雙三次 3.5 ms)。
+        /// 雙三次縮到一半以下會跳過像素 (細筆畫斷掉)：先用面積平均剛好縮一半 (快、不跳像素)，剩下的再用雙三次
+        /// </summary>
+        public static void Downscale(Mat src, Mat dst, OpenCvSharp.Size size)
+        {
+            Mat cur = src;
+            var temps = new List<Mat>(2);
+            try
+            {
+                while (cur.Width >= size.Width * 2 && cur.Height >= size.Height * 2)
+                {
+                    var half = FramePool.Rent(cur.Height / 2, cur.Width / 2, cur.Type());
+                    Cv2.Resize(cur, half, new OpenCvSharp.Size(cur.Width / 2, cur.Height / 2), 0, 0, InterpolationFlags.Area);
+                    temps.Add(half);
+                    cur = half;
+                }
+                Cv2.Resize(cur, dst, size, 0, 0, InterpolationFlags.Cubic);
+            }
+            finally { foreach (Mat t in temps) FramePool.Return(t); }
         }
 
         /// <summary>送出的影像大小：寬度不超過 maxWidth，寬高都是偶數 (H.264 要求)</summary>
