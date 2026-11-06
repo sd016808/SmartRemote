@@ -1,7 +1,6 @@
 using OpenCvSharp;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Runtime.Intrinsics.X86;
 
 namespace SmartRemote.Core
 {
@@ -340,9 +339,10 @@ namespace SmartRemote.Core
         }
 
         // BGRA → I420 (軟體) 或 NV12 (硬體：U、V 交錯放在同一個平面)。
-        // 直接轉進編碼器的輸入緩衝，不先轉到暫存再搬一次 (2560x1440 每張省 2 ms 左右)
-        byte[] chroma = Array.Empty<byte>(); // NV12 用：U、V 兩個平面的暫存
-
+        // 直接轉進編碼器的輸入緩衝，不先轉到暫存再搬一次 (2560x1440 每張省 2 ms 左右)。
+        // 亮度 (Y) 用 OpenCV 轉；顏色 (U、V) 自己算每 2x2 格的平均 (跟 Chrome / WebRTC 用的 libyuv 一樣)：
+        // OpenCV 的 BGRA2YUV_I420 只取每格「左上角」那個像素的顏色，字邊 ClearType 的彩色像素會被放大成整格的飽和色
+        // (其他三格的就整個不見)，字看起來細、邊緣有青 / 紅 / 藍的光暈 (v1.3.12 以前，跟 Google 遠端桌面比字明顯糊)
         void FillInput(Mat bgra, byte* dst)
         {
             int ySize = Width * Height, cSize = ySize / 4;
@@ -352,32 +352,38 @@ namespace SmartRemote.Core
                 if (target.Data != (IntPtr)dst) // OpenCV 沒有用我們給的記憶體 (大小對就不會發生)：搬過來
                     Buffer.MemoryCopy((byte*)target.Data, dst, frameSize, frameSize);
             }
-            if (!nv12) return;
+            // 蓋掉 OpenCV 算的 U、V：NV12 是 U、V 交錯一個平面，I420 是 U 平面接 V 平面
+            byte* src = (byte*)bgra.DataPointer;
+            long stride = bgra.Step();
+            if (nv12) AverageChroma(src, stride, Width, Height, dst + ySize, dst + ySize + 1, Width, 2);
+            else AverageChroma(src, stride, Width, Height, dst + ySize, dst + ySize + cSize, Width / 2, 1);
+        }
 
-            // 現在 Y 後面是 U 平面接 V 平面，NV12 要 U、V 一個一個交錯：先把這兩個平面抄出來再交錯寫回去
-            if (chroma.Length < 2 * cSize) chroma = new byte[2 * cSize];
-            byte* uv = dst + ySize;
-            fixed (byte* u = chroma)
+        // BT.601、16 ~ 235 (跟 OpenCV 的 BGRA2YUV_I420 同一組係數) 乘 65536；四個像素加總後右移 18 = 除以 4 再除以 65536
+        const int RU = -9714, GU = -19071, BU = 28784, RV = 28784, GV = -24103, BV = -4681;
+        const int ChromaOffset = (128 << 18) + (1 << 17); // 128 + 四捨五入
+
+        /// <summary>每 2x2 格平均算 U、V；step = 1 (I420 的 U、V 平面) 或 2 (NV12 交錯)，rowBytes = 一行 U (或 V) 的位元組數。
+        /// 2560x1440 約 1.7 ms (分幾段平行算)；跟精確公式比最大差 1</summary>
+        static void AverageChroma(byte* src, long stride, int width, int height, byte* u, byte* v, int rowBytes, int step)
+        {
+            int rows = height / 2, cols = width / 2;
+            int chunks = Math.Clamp(Environment.ProcessorCount, 1, 8), per = (rows + chunks - 1) / chunks;
+            Parallel.For(0, chunks, c =>
             {
-                Buffer.MemoryCopy(uv, u, 2 * cSize, 2 * cSize);
-                byte* v = u + cSize;
-                int i = 0;
-                if (Sse2.IsSupported)
+                int end = Math.Min(rows, (c + 1) * per);
+                for (int j = c * per; j < end; j++)
                 {
-                    for (; i + 16 <= cSize; i += 16)
+                    byte* r0 = src + 2 * j * stride, r1 = r0 + stride;
+                    byte* pu = u + j * rowBytes, pv = v + j * rowBytes;
+                    for (int i = 0; i < cols; i++, r0 += 8, r1 += 8, pu += step, pv += step)
                     {
-                        var a = Sse2.LoadVector128(u + i);
-                        var b = Sse2.LoadVector128(v + i);
-                        Sse2.Store(uv + 2 * i, Sse2.UnpackLow(a, b));
-                        Sse2.Store(uv + 2 * i + 16, Sse2.UnpackHigh(a, b));
+                        int b = r0[0] + r0[4] + r1[0] + r1[4], g = r0[1] + r0[5] + r1[1] + r1[5], r = r0[2] + r0[6] + r1[2] + r1[6];
+                        *pu = (byte)((RU * r + GU * g + BU * b + ChromaOffset) >> 18);
+                        *pv = (byte)((RV * r + GV * g + BV * b + ChromaOffset) >> 18);
                     }
                 }
-                for (; i < cSize; i++)
-                {
-                    uv[2 * i] = u[i];
-                    uv[2 * i + 1] = v[i];
-                }
-            }
+            });
         }
 
         // 非同步 (硬體)：編碼器要輸入時才能送；送完等這張的輸出 (不等的話畫面停下來時最後一張會卡在編碼器裡)。
