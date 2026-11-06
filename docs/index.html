@@ -84,6 +84,7 @@
   }
   .bar select { padding:6px 8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); }
   #stage { flex:1; min-height:0; overflow:auto; display:flex; background:#000; position:relative; outline:none; touch-action:none; }
+  #stage.gutter { scrollbar-gutter:stable; }
   .media { display:block; margin:auto; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
   /* 顯示方式：填滿寬度 (太高就捲動) / 整個畫面 (縮到看得到全部) / 原始大小 (跟著瀏覽器縮放、手機可以兩指放大) */
   .media.width { width:100%; height:auto; }
@@ -887,6 +888,7 @@ function setZoom(z, anchor, at) {
   z = Math.min(ZOOM_MAX, Math.max(1, z));
   if (z < 1.03) { resetZoom(); return; }
   zoom = z;
+  if (el === video) unlockVideo();   // 放大：不再 1:1 (大小由這裡管)
   Object.assign(el.style, { width: zoomBase.w * z + "px", height: zoomBase.h * z + "px", maxWidth: "none", maxHeight: "none", flex: "none", objectFit: "fill" });
   const s = shown();
   if (!s) return;
@@ -895,7 +897,8 @@ function setZoom(z, anchor, at) {
 }
 function resetZoom() {
   zoom = 1; zoomBase = null;
-  for (const el of [video, img]) for (const k of ["width", "height", "maxWidth", "maxHeight", "flex", "objectFit"]) el.style[k] = "";
+  for (const el of [video, img]) for (const k of LOCK_STYLES) el.style[k] = "";
+  pixelLocked = false;   // 不放大了：下一次 layoutVideo 重新設成剛好的大小
 }
 // 轉向 / 視窗寬度變了：原本放大前的大小不準了，回到不放大。只有高度變 (手機鍵盤跳出來 / 收起來) 的話照舊，不然打個字放大就不見了
 let zoomW = innerWidth;
@@ -907,21 +910,71 @@ window.addEventListener("resize", () => { if (innerWidth !== zoomW) { zoomW = in
 // 原始大小 = 顯示大小跟著影像大小走，不能反過來限制 (會越縮越小)：送 0 = 不限制。
 // 拖拉視窗、手機鍵盤跳出來時大小會一直變，電腦端每換一次都要重建編碼器、重送關鍵畫格：
 // 變大 0.3 秒後才送；變小 1 秒後才送 (只小 3% 以內要 3 秒都沒再變)。
-// 寬度要剛好 (不要進位)：差 1% 瀏覽器也得把每個像素重新取樣，一樣會糊。舊版分享端收到會忽略 ---
+// 寬度要剛好 (不要進位)：差 1% 瀏覽器也得把每個像素重新取樣，一樣會糊。舊版分享端收到會忽略。
+// 送來了之後還要真的 1:1 顯示 (layoutVideo)：大小剛好、位置對齊螢幕像素 ---
 let viewSent = -1, viewTimer = 0;   // viewSent：-1 = 這次連線還沒送過，0 = 不限制
 let screenList = [];                // 電腦的螢幕清單 (showScreens)
 const curScreen = () => { const v = Number($("screens").value); return screenList.find(s => s.i === v) || screenList.find(s => s.primary) || screenList[0]; };
+// 電腦畫面在畫面區可以佔多寬 (CSS 像素)：照「畫面區」的大小和電腦螢幕的長寬比算，不照影像現在顯示的大小
+// (影像會被 layoutVideo 設成剛好的大小，照它算就永遠不會變；用目前影像的長寬比也不行：電腦端縮完寬高取偶數，
+// 長寬比差一點點，寬度就跟著差 2 像素 → 重建編碼器 → 長寬比又變…，1.3.14 實際看到 2362 ↔ 2364 來回)
+function boxWidth() {
+  if (zoom !== 1) { const s = shown(); return s ? s.w : -1; }   // 放大中：放大後的大小
+  const src = curScreen(), el = media();
+  const aspect = src && src.w && src.h ? src.w / src.h : el.videoWidth && el.videoHeight ? el.videoWidth / el.videoHeight : 0;
+  const W = stage.clientWidth, H = stage.clientHeight;   // 不含捲軸
+  if (!aspect || !W || !H) return -1;
+  return fit.value === "fit" ? Math.min(W, H * aspect) : W;
+}
 function viewWidth() {
   if (fit.value === "real") return 0;
-  const s = shown();
-  if (!s) return -1;
-  let w = s.w;
-  // 整個畫面：用電腦螢幕的長寬比算，不用目前影像的 (電腦端縮完寬高要取偶數，長寬比差一點點，
-  // 算出來的寬度就跟著差 2 像素 → 又重建一次編碼器 → 長寬比又變…，1.3.14 實際看到 2362 ↔ 2364 來回)
-  const src = curScreen();
-  if (fit.value === "fit" && zoom === 1 && src && src.w && src.h) { const r = media().getBoundingClientRect(); w = Math.min(r.width, r.height * src.w / src.h); }
-  return Math.round(w * (window.devicePixelRatio || 1) / 2) * 2;   // H.264 要偶數
+  const w = boxWidth();
+  if (w < 0) return -1;
+  return Math.floor(w * (window.devicePixelRatio || 1) / 2) * 2;   // H.264 要偶數；無條件捨去 = 不會比畫面區大
 }
+
+// 真的 1:1 顯示：電腦端照要的大小送來了 (或小一點點) 就讓 1 個影像像素剛好畫在 1 個螢幕像素上。
+// 不這樣的話只有 200% 縮放的螢幕剛好對齊：125% / 150% 時影像差半個像素、視窗寬度是奇數時差 1 像素，
+// 瀏覽器都要把整張重新取樣 (實測跟收到的影像差 1.7 ~ 8，字明顯灰糊；客戶 0.77 倍時就是這樣)。
+// 不能直接把 CSS 大小設成「影像像素 ÷ devicePixelRatio」：瀏覽器排版只精確到 1/64 像素，除不盡 (例如 1102 ÷ 1.25 = 881.6)
+// 就差一點點，一樣整張重新取樣 (實測差 0.7 ~ 1.9)。所以 CSS 大小直接用影像像素 (一定是整數)，再用 transform 縮小 1/dpr、
+// 平移到對齊螢幕像素的位置 (transform 是浮點數，不受 1/64 限制；實測 110% ~ 225%、捲動中都完全一樣)。
+// 放大中、原始大小、送來的比畫面區大 (舊版分享端) 就照原本的方式顯示
+let pixelLocked = false;
+const LOCK_STYLES = ["position", "left", "top", "margin", "width", "height", "maxWidth", "maxHeight", "flex", "objectFit", "transform", "transformOrigin"];
+function unlockVideo() {
+  if (!pixelLocked) return;
+  pixelLocked = false;
+  for (const k of LOCK_STYLES) video.style[k] = "";
+}
+function layoutVideo() {
+  const el = video;
+  if (zoom !== 1) return;   // 放大的大小由 setZoom 管
+  const vw = el.videoWidth, vh = el.videoHeight, want = viewWidth();
+  const fits = caps && caps.video && fit.value !== "real" && vw && vh && want > 0 && vw <= want && vw >= want - 4;
+  if (!fits) return unlockVideo();
+  const w = vw + "px", h = vh + "px";
+  if (!pixelLocked || el.style.width !== w || el.style.height !== h)
+    Object.assign(el.style, { position: "absolute", left: "0px", top: "0px", margin: "0", width: w, height: h, maxWidth: "none", maxHeight: "none", flex: "none", objectFit: "fill", transformOrigin: "0 0" });
+  pixelLocked = true;
+  snapVideo();
+}
+// 放在畫面區中間、左上角對齊螢幕像素 (畫面區本身的位置、捲動位置都可能落在半個像素上：先算一次，再照實際位置修一次)
+function snapVideo() {
+  if (!pixelLocked) return;
+  const el = video, dpr = window.devicePixelRatio || 1, vw = el.videoWidth, vh = el.videoHeight;
+  if (!vw || !vh) return;
+  const frac = v => (Math.round(v * dpr) - v * dpr) / dpr;
+  const b = stage.getBoundingClientRect();
+  let x = Math.round(Math.max(0, (stage.clientWidth - vw / dpr) / 2) * dpr) / dpr + frac(b.left);
+  let y = Math.round(Math.max(0, (stage.clientHeight - vh / dpr) / 2) * dpr) / dpr + frac(b.top);
+  const scale = `scale(${1 / dpr})`;
+  el.style.transform = `translate(${x}px, ${y}px) ${scale}`;
+  const r = el.getBoundingClientRect();
+  x += frac(r.left); y += frac(r.top);
+  el.style.transform = `translate(${x}px, ${y}px) ${scale}`;
+}
+stage.addEventListener("scroll", snapVideo, { passive: true });   // 捲動也可能停在半個像素
 function checkView() {
   clearTimeout(viewTimer); viewTimer = 0;
   if (!caps) return;
@@ -934,11 +987,12 @@ function checkView() {
   // 一直在變的話 (捲軸一下有一下沒有) 每次都重新計時，就不會一直重建)
   viewTimer = setTimeout(go, want > cur ? 300 : want < cur * 0.97 ? 1000 : 3000);
 }
-const viewWatch = new ResizeObserver(() => checkView());
+const onLayout = () => { layoutVideo(); checkView(); };
+const viewWatch = new ResizeObserver(onLayout);
 for (const el of [video, img, stage]) viewWatch.observe(el);
-video.addEventListener("resize", () => checkView());   // 影像大小變了 (換螢幕：長寬比可能不一樣)
+video.addEventListener("resize", onLayout);   // 影像大小變了 (電腦端照新的大小送來了、換螢幕)
 img.addEventListener("load", () => { if (viewSent < 0) checkView(); });
-window.addEventListener("resize", () => checkView());   // 包含瀏覽器縮放、視窗搬到另一個 DPI 的螢幕
+window.addEventListener("resize", onLayout);   // 包含瀏覽器縮放、視窗搬到另一個 DPI 的螢幕
 function spread() { const [a, b] = [...touches.values()]; return a && b ? Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) : 0; }
 
 // 相對座標：手指移動 → 游標移動，加速看手指的「速度」：慢慢滑可以點得準，快速滑可以一下移很遠。
@@ -1330,7 +1384,14 @@ setBar(store.get("lash-bar", "1") !== "0");
 
 const fit = $("fit");
 fit.value = store.get("lash-fit", "width");
-const applyFit = () => { resetZoom(); for (const el of [video, img]) { el.classList.remove("width", "fit", "real"); el.classList.add(fit.value); } store.set("lash-fit", fit.value); checkView(); };
+const applyFit = () => {
+  resetZoom();
+  for (const el of [video, img]) { el.classList.remove("width", "fit", "real"); el.classList.add(fit.value); }
+  // 填滿寬度：先留好捲軸的位置，畫面區寬度才不會因為捲軸出現 / 不見而變 (變了電腦端要重建編碼器，可能來回不停)
+  stage.classList.toggle("gutter", fit.value === "width");
+  store.set("lash-fit", fit.value);
+  onLayout();
+};
 fit.onchange = applyFit;
 applyFit();
 $("quality").onchange = () => {
