@@ -29,6 +29,7 @@ namespace SmartRemote.Service
                             Logger.Warn($"加入 Windows 防火牆規則失敗 (同一個區網的觀看端可能連不上)：{ex.Message}");
                             return;
                         }
+                        if (attempt == 1) Logger.Info($"Windows 防火牆規則還沒加上 ({ex.Message})，15 秒後再試");
                         Thread.Sleep(15000);
                     }
                 }
@@ -38,23 +39,22 @@ namespace SmartRemote.Service
         static void EnsureAllowed(string exe)
         {
             // 已經有就不動 (使用者自己停用的話也尊重)
-            if (Netsh($"advfirewall firewall show rule name=\"{RuleName}\"", out _) == 0) return;
+            if (Netsh($"advfirewall firewall show rule name=\"{RuleName}\"") == 0) return;
             int code = Netsh($"advfirewall firewall add rule name=\"{RuleName}\" dir=in action=allow program=\"{exe}\" " +
-                             "protocol=udp profile=any enable=yes description=\"讓觀看端 (手機、別台電腦) 連得進來\"", out string output);
-            if (code != 0) throw new InvalidOperationException($"netsh 代碼 {code}：{output}");
+                             "protocol=udp profile=any enable=yes description=\"讓觀看端 (手機、別台電腦) 連得進來\"");
+            if (code != 0) throw new InvalidOperationException($"netsh 代碼 {code}");
             Logger.Info($"已在 Windows 防火牆加入規則「{RuleName}」：允許 {exe} 接收連線 (UDP)");
         }
 
-        static int Netsh(string arguments, out string output)
+        // 只看結束代碼，輸出不要轉向：轉向要開可繼承的管道，同一時間服務開遠端程式 (CreateProcessAsUser 繼承 handle)
+        // 的話，遠端程式會拿到管道的寫入端，netsh 結束了也讀不到結尾，這條執行緒就永遠卡住 (v1.3.11 的 bug：規則一直沒加上)
+        static int Netsh(string arguments)
         {
-            var info = new ProcessStartInfo("netsh.exe", arguments)
-            {
-                UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
-            };
+            var info = new ProcessStartInfo("netsh.exe", arguments) { UseShellExecute = false, CreateNoWindow = true };
             using Process p = Process.Start(info);
-            output = (p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd()).Trim();
-            p.WaitForExit(15000);
-            return p.HasExited ? p.ExitCode : -1;
+            if (p.WaitForExit(15000)) return p.ExitCode;
+            try { p.Kill(); } catch { }
+            return -1;
         }
     }
 }
