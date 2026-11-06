@@ -35,6 +35,18 @@ namespace SmartRemote.Core
         volatile int autoBitrate = 10_000_000, autoTier = 2;
         long autoTierAt;
 
+        // 觀看頁畫面實際畫在幾個裝置像素上 ({"t":"view","w":...}，0 / 沒送 = 不限制)：比這個大的送過去也只是被瀏覽器縮小
+        // (瀏覽器縮影片用最簡單的雙線性，細字會粗細不均)；這邊用面積平均縮好、觀看頁 1:1 顯示，字比較清楚，
+        // 像素少了同樣流量畫質也比較好。舊版觀看頁不會送 = 跟以前一樣
+        volatile int viewWidth = int.MaxValue;
+
+        // 這次要送多寬：畫質的上限、觀看頁顯示的寬度取小的；顯示寬度跟原尺寸差不多 (97% 以上) 就直接送原尺寸
+        int MaxWidth(Quality q, int sourceWidth)
+        {
+            int view = viewWidth;
+            return Math.Min(q.MaxWidth, view >= sourceWidth - sourceWidth / 32 ? int.MaxValue : view);
+        }
+
         public string Id { get; }
         public bool Control { get; private set; }
         public bool Connected => connectedAt != null;
@@ -219,6 +231,12 @@ namespace SmartRemote.Core
                 case "encoder": // 觀看頁選硬體 / 軟體編碼
                     wantHardware = m.GetProperty("hw").GetBoolean();
                     return;
+                case "view": // 觀看頁畫面顯示的寬度 (裝置像素)；0 = 不限制 (原始大小)
+                    int vw = m.TryGetProperty("w", out var wv) ? wv.GetInt32() : 0;
+                    int was = viewWidth;
+                    viewWidth = vw <= 0 ? int.MaxValue : Math.Max(vw, 320);
+                    if (viewWidth != was) Logger.Info($"[遠端畫面] 觀看端 {Id} 顯示寬度 {(vw <= 0 ? "不限制" : viewWidth.ToString())}");
+                    return;
             }
             if (!Control || input == null) return; // 只能看：遙控的訊息一律不理
             switch (t)
@@ -334,7 +352,7 @@ namespace SmartRemote.Core
                     }
                     using (img)
                     {
-                        (int w, int h) = VideoSize(img.Width, img.Height, q.MaxWidth);
+                        (int w, int h) = VideoSize(img.Width, img.Height, MaxWidth(q, img.Width));
                         using Mat small = img.Width == w && img.Height == h ? img.Clone() : img.Resize(new OpenCvSharp.Size(w, h), 0, 0, InterpolationFlags.Area);
                         // 還沒送完的太多 (網路慢) 就跳過這張
                         if (main.bufferedAmount < 2 * 1024 * 1024) SendJpeg(small, q.JpegQuality, jpegFrame++);
@@ -380,7 +398,7 @@ namespace SmartRemote.Core
                     using var lease = FramePool.ReturnLater(img); // 用完還回去給下一張用，不重新配置記憶體
                     int qi = quality;
                     Quality q = CurrentQuality(qi);
-                    (int w, int h) = VideoSize(img.Width, img.Height, q.MaxWidth);
+                    (int w, int h) = VideoSize(img.Width, img.Height, MaxWidth(q, img.Width));
                     Mat small = null;
                     if (img.Width != w || img.Height != h)
                     {

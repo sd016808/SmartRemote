@@ -348,6 +348,7 @@ function closePeer() {
   lastVideoStats = null;   // 新的連線統計從 0 開始算
   lastFrameAt = 0;         // 重連時顯示「等待畫面…」，不是「N 秒沒有新畫面」
   probeAt = 0;
+  clearTimeout(viewTimer); viewTimer = 0; viewSent = -1;   // 新的連線要重新告訴電腦端顯示大小
 }
 function loginMsg(text, bad) { $("loginMsg").textContent = text || ""; $("loginMsg").className = bad ? "bad" : ""; }
 function showLogin(text, bad) {
@@ -671,6 +672,8 @@ function onText(ch, m) {
       for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn"]) $(id).classList.toggle("hidden", !m.control);
       $("touchMode").classList.toggle("hidden", !(m.control && isTouch));
       if (m.control && store.get("lash-control", "0") === "1") setControl(true, true);
+      viewSent = -1;
+      checkView();   // 畫面大小還不知道的話，第一張畫面出來時 (video 的 resize) 會再算
       break;
     case "pong":
       if (probeAt && m.ts >= probeAt) probeAt = 0;   // 從背景回來之後送的 ping 有回應：連線還活著
@@ -740,6 +743,8 @@ setInterval(async () => {
       + (rtt !== null ? ` · 延遲 ${Math.round(rtt)} ms` : "")
       + (autoOn() ? ` · 自動 ${(autoRate / 1e6).toFixed(1)} Mbps` : "");
   tickFrames = tickBytes = 0;
+  const el = media();
+  $("stats").title = el && (el.videoWidth || el.naturalWidth) ? `電腦送來的畫面 ${el.videoWidth || el.naturalWidth}×${el.videoHeight || el.naturalHeight}` : "";
   const idle = lastFrameAt ? Math.floor((Date.now() - lastFrameAt) / 1000) : 0;
   if (idle >= 5) setState("warn", `已連線，${idle} 秒沒有新畫面`);
   else if (lastFrameAt) setState("ok", controlOn ? "已連線 · 遙控中" : "已連線");
@@ -894,6 +899,37 @@ function resetZoom() {
 // 轉向 / 視窗寬度變了：原本放大前的大小不準了，回到不放大。只有高度變 (手機鍵盤跳出來 / 收起來) 的話照舊，不然打個字放大就不見了
 let zoomW = innerWidth;
 window.addEventListener("resize", () => { if (innerWidth !== zoomW) { zoomW = innerWidth; if (zoom !== 1) resetZoom(); } });
+
+// --- 告訴電腦端畫面實際畫在幾個裝置像素上 ({t:"view", w})：比這個大的送過來也只是被瀏覽器縮小
+// (瀏覽器縮影片用最簡單的雙線性，細字會粗細不均)；電腦端用面積平均縮好、這裡 1:1 顯示，字比較清楚，
+// 像素少了同樣流量畫質也比較好、手機解碼也比較輕。雙指放大也算進去 (放大後要看得到細節)。
+// 原始大小 = 顯示大小跟著影像大小走，不能反過來限制 (會越縮越小)：送 0 = 不限制。
+// 拖拉視窗、手機鍵盤跳出來時大小會一直變，電腦端每換一次都要重建編碼器、重送關鍵畫格：
+// 變大 0.3 秒後才送；變小要差 3% 以上 (捲軸出現 / 不見只差 1% 左右，不用換)、而且 1 秒後才送。
+// 寬度要剛好 (不要進位)：差 1% 瀏覽器也得把每個像素重新取樣，一樣會糊。舊版分享端收到會忽略 ---
+let viewSent = -1, viewTimer = 0;   // viewSent：-1 = 這次連線還沒送過，0 = 不限制
+function viewWidth() {
+  if (fit.value === "real") return 0;
+  const s = shown();
+  if (!s) return -1;
+  return Math.round(s.w * (window.devicePixelRatio || 1) / 2) * 2;   // H.264 要偶數
+}
+function checkView() {
+  clearTimeout(viewTimer); viewTimer = 0;
+  if (!caps) return;
+  const w = viewWidth();
+  if (w < 0 || w === viewSent) return;
+  const go = () => { viewTimer = 0; const now = viewWidth(); if (now < 0 || now === viewSent || !caps) return; viewSent = now; send({ t: "view", w: now }); };
+  if (viewSent < 0) return go();   // 剛連上：馬上送
+  const cur = viewSent === 0 ? Infinity : viewSent, want = w === 0 ? Infinity : w;
+  if (want < cur && want > cur * 0.97) return;   // 只小一點點：不用換
+  viewTimer = setTimeout(go, want > cur ? 300 : 1000);
+}
+const viewWatch = new ResizeObserver(() => checkView());
+for (const el of [video, img, stage]) viewWatch.observe(el);
+video.addEventListener("resize", () => checkView());   // 影像大小變了 (換螢幕：長寬比可能不一樣)
+img.addEventListener("load", () => { if (viewSent < 0) checkView(); });
+window.addEventListener("resize", () => checkView());   // 包含瀏覽器縮放、視窗搬到另一個 DPI 的螢幕
 function spread() { const [a, b] = [...touches.values()]; return a && b ? Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) : 0; }
 
 // 相對座標：手指移動 → 游標移動，加速看手指的「速度」：慢慢滑可以點得準，快速滑可以一下移很遠。
@@ -1285,7 +1321,7 @@ setBar(store.get("lash-bar", "1") !== "0");
 
 const fit = $("fit");
 fit.value = store.get("lash-fit", "width");
-const applyFit = () => { resetZoom(); for (const el of [video, img]) { el.classList.remove("width", "fit", "real"); el.classList.add(fit.value); } store.set("lash-fit", fit.value); };
+const applyFit = () => { resetZoom(); for (const el of [video, img]) { el.classList.remove("width", "fit", "real"); el.classList.add(fit.value); } store.set("lash-fit", fit.value); checkView(); };
 fit.onchange = applyFit;
 applyFit();
 $("quality").onchange = () => {
