@@ -65,8 +65,10 @@
 - 系統匣圖示還在，右鍵選單一樣能用；真正在連線的是系統服務，所以「結束」變成「關閉圖示」（服務繼續執行）。
   「開機自動啟動」變成「登入時顯示這個圖示」。改了設定檔之後按「重新啟動遠端服務」套用。
 - 房間碼 / 密碼沒填的話，每次開機（服務啟動）隨機產生一組，換人登入、重新登入都不會變。
+- 服務啟動時會在 Windows 防火牆加一條規則「SmartRemote 遠端畫面 (系統服務)」，允許這個程式接收連線。一般模式是第一次連線時 Windows 跳出來問「允許存取」；系統服務不會跳，沒有這條規則的話，同一個區網（同一個 Wi-Fi / 路由器）的手機、電腦會連不上。取消勾選系統服務時這條規則會留著（程式還在 Program Files 繼續用）。
 - 取消勾選就移除系統服務，回到一般模式（程式留在 Program Files 繼續用）。
 - 日誌：`service_*.log` 是服務本體、`agent_*.log` 是負責連線的遠端程式、`smartremote_*.log` 是系統匣。
+  沒連上時 `agent_*.log` 會記下觀看端給了哪些位址、觀看端的封包有沒有進來（一個都沒進來通常是防火牆擋住）。
 
 ## 安全
 
@@ -118,7 +120,7 @@ dotnet publish SmartRemote -c Release -r win-x64 --self-contained true -o publis
   - `App/`：設定檔、更新、開機自動啟動
   - `Tray/`：系統匣介面；`TrayEngine.cs` 分一般模式（自己連線）與服務模式（透過管道控制遠端程式）
   - `Service/`：系統服務模式。`ServiceHost`（`--service`）顧著 `Agent`（`--agent`，SYSTEM 權限的遠端程式），
-    `AgentPipe` 是遠端程式與系統匣之間的管道，`ServiceSetup` 負責安裝 / 移除
+    `AgentPipe` 是遠端程式與系統匣之間的管道，`ServiceSetup` 負責安裝 / 移除，`Firewall` 補 Windows 防火牆的允許規則
 - `docs/index.html`：觀看頁（GitHub Pages）
 
 ## 協定

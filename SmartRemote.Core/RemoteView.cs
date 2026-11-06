@@ -195,6 +195,7 @@ namespace SmartRemote.Core
                 session.Video.AddTrack(sdp);
                 var result = pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.offer, sdp = sdp });
                 if (result != SetDescriptionResultEnum.OK) { Logger.Warn($"[遠端畫面] 觀看端 {id} 的連線碼無效: {result}"); session.Close($"連線碼無效 {result}"); return; }
+                session.WatchIce(sdp);
                 // 一定要等位址收集完 (STUN 查到外網位址) 才建立回覆：回覆裡的位址在 createAnswer 當下就固定了。
                 // 先回覆再等的話，只有程式剛啟動、第一次比較慢時碰巧來得及，之後的回覆都沒有外網位址，只有同一個區網連得上 (v1.15.0 的 bug)
                 if (pc.iceGatheringState != RTCIceGatheringState.complete) await Task.WhenAny(gathered.Task, Task.Delay(5000));

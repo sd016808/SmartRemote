@@ -541,8 +541,59 @@ namespace SmartRemote.Core
             if (connectedAt != null)
                 RemoteLog.Write(Id, $"中斷連線 ({reason})  連了 {RemoteLog.Duration(DateTime.Now - connectedAt.Value)}{used}");
             else
-                RemoteLog.Write(Id, $"沒有連上 ({reason})");
+            {
+                string hint = "";
+                if (offeredCandidates != null)
+                {
+                    Logger.Info($"[遠端畫面] 觀看端 {Id} 沒有連上：觀看端給的位址 {offeredCandidates}；收到觀看端的連線測試 {checksIn} 次" +
+                                (candidateError != null ? $"；{candidateError}" : ""));
+                    if (checksIn == 0) hint = "，觀看端的封包都沒進來 (可能被 Windows 防火牆擋住，或雙方網路不允許直連)";
+                }
+                RemoteLog.Write(Id, $"沒有連上 ({reason}){hint}");
+            }
             RemoteView.Remove(this);
+        }
+
+        // ===== 沒連上時的診斷 (寫日誌)：觀看端給了哪些位址、觀看端的連線測試封包有沒有進來 =====
+        string offeredCandidates, candidateError;
+        int checksIn;
+
+        /// <summary>設好觀看端的連線碼之後呼叫 (那時才有 ICE 通道)</summary>
+        public void WatchIce(string offerSdp)
+        {
+            offeredCandidates = DescribeCandidates(offerSdp);
+            var ice = pc.GetRtpChannel();
+            if (ice == null) return;
+            ice.OnStunMessageReceived += (msg, ep, relayed) =>
+            {
+                if (msg.Header.MessageType == STUNMessageTypesEnum.BindingRequest) Interlocked.Increment(ref checksIn);
+            };
+            ice.OnIceCandidateError += (c, error) => Interlocked.CompareExchange(ref candidateError, error, null);
+        }
+
+        // 連線碼裡的位址：區網 (Chrome 會藏成 xxx.local，要 mDNS 查)、外網 (STUN 查到的)、中繼；只算 UDP
+        static string DescribeCandidates(string sdp)
+        {
+            int hidden = 0, host = 0, srflx = 0, relay = 0;
+            foreach (string raw in sdp.Split('\n'))
+            {
+                string line = raw.Trim();
+                if (!line.StartsWith("a=candidate:")) continue;
+                string[] f = line.Split(' ');
+                if (f.Length < 8 || f[6] != "typ" || !f[2].Equals("udp", StringComparison.OrdinalIgnoreCase)) continue;
+                switch (f[7])
+                {
+                    case "host": if (f[4].EndsWith(".local", StringComparison.OrdinalIgnoreCase)) hidden++; else host++; break;
+                    case "srflx": case "prflx": srflx++; break;
+                    case "relay": relay++; break;
+                }
+            }
+            var parts = new List<string>();
+            if (hidden > 0) parts.Add($"區網 {hidden} 個 (藏成 .local)");
+            if (host > 0) parts.Add($"區網 {host} 個");
+            if (srflx > 0) parts.Add($"外網 {srflx} 個");
+            if (relay > 0) parts.Add($"中繼 {relay} 個");
+            return parts.Count > 0 ? string.Join("、", parts) : "沒有";
         }
     }
 }

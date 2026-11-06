@@ -44,6 +44,7 @@ namespace SmartRemote.Service
                 statusHandle = RegisterServiceCtrlHandlerExW(name, (IntPtr)(delegate* unmanaged<uint, uint, IntPtr, IntPtr, uint>)&Handler, IntPtr.Zero);
                 SetState(SERVICE_RUNNING);
                 Logger.Info($"========== 系統服務啟動 v{AutoUpdater.CurrentVersion} ==========");
+                Firewall.EnsureAllowedInBackground(Environment.ProcessPath); // 安裝、更新後都會重新啟動服務，舊版裝的也會補上
                 Supervise();
             }
             catch (Exception ex) { Logger.Warn($"系統服務出錯: {ex}"); }
