@@ -2,7 +2,8 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- interactive-widget：手機鍵盤跳出來時版面跟著縮 (Android Chrome)，最下面的打字列才會在鍵盤上方，不會被蓋住 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#0f1115">
 <title>SmartRemote 遠端畫面</title>
 <!--
@@ -94,6 +95,12 @@
              color:#fff; background:rgba(0,0,0,.5); font-size:14px; pointer-events:none; }
   #note { position:absolute; left:50%; top:12px; transform:translateX(-50%); max-width:calc(100% - 32px);
           padding:8px 14px; border-radius:8px; background:rgba(240,180,41,.95); color:#1b1f27; font-size:13px; pointer-events:none; }
+  /* 手機遙控時最下面的打字列 (像 Google 遠端桌面)：打字 → 送出；組合鍵才開「鍵盤」面板。
+     字要 16px 以上，iPhone 點輸入框時才不會自動放大整個頁面 */
+  #typeBar { display:flex; align-items:center; gap:6px; padding:6px 8px calc(6px + env(safe-area-inset-bottom));
+             background:var(--panel); border-top:1px solid var(--line); }
+  #typeBar input { flex:1; width:auto; min-width:0; padding:8px 10px; font-size:16px; }
+  #typeBar .btn { flex:none; min-width:42px; padding:8px 10px; }
   #toast { position:fixed; left:50%; top:72px; transform:translateX(-50%); max-width:calc(100% - 32px); z-index:30;
            padding:9px 16px; border-radius:8px; background:rgba(23,26,33,.95); color:#e8eaf0; font-size:13px;
            border:1px solid #2a2f3a; box-shadow:0 8px 24px rgba(0,0,0,.3); pointer-events:none; transition:opacity .2s; }
@@ -115,7 +122,7 @@
   .keys { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
   .keys .btn { padding:6px 10px; min-width:44px; font-size:13px; }
   .section { font-size:12px; color:var(--muted); margin:14px 0 0; }
-  .section:first-child { margin-top:0; }
+  .section:first-child, #kbText.hidden + .section { margin-top:0; }
   .help { font-size:12px; color:var(--muted); margin:12px 0 0; }
 
   #files .path { font-size:12px; color:var(--muted); word-break:break-all; margin-bottom:8px; }
@@ -206,15 +213,29 @@
     <div id="note" class="hidden"></div>
   </div>
 
+  <!-- 手機遙控時的打字列：打好按送出 (或手機鍵盤的送出鍵) 就打到電腦上目前的輸入位置；沒打字時按送出鍵 = Enter -->
+  <form id="typeBar" class="hidden" autocomplete="off">
+    <input id="typeIn" type="text" placeholder="打字送到電腦（中文也可以）" enterkeyhint="send" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="打字送到電腦">
+    <button class="btn primary" id="typeSend" type="submit" title="把打的字送到電腦 (沒打字 = Enter)">送出</button>
+    <button class="btn" id="typeEnter" type="button" title="Enter (有打字就先送出再按)" aria-label="Enter">⏎</button>
+    <button class="btn" id="typeBack" type="button" title="Backspace (刪掉電腦上的一個字)" aria-label="Backspace">⌫</button>
+    <button class="btn" id="typeKeys" type="button" title="組合鍵 / 特殊按鍵 (Ctrl、Alt、F1~F12…)" aria-label="組合鍵">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg>
+    </button>
+  </form>
+
   <!-- 鍵盤：輸入文字 (手機輸入法、中文) + 特殊按鍵 -->
   <section class="sheet hidden" id="kbSheet" aria-label="鍵盤">
     <header><h2>鍵盤</h2><button class="close" type="button" data-close>×</button></header>
     <div class="body">
-      <p class="section">輸入文字 (直接打到電腦上目前的輸入位置)</p>
-      <textarea id="textIn" placeholder="在這裡打字，按送出" spellcheck="false"></textarea>
-      <div class="row end">
-        <button class="btn" type="button" id="sendText">送出</button>
-        <button class="btn primary" type="button" id="sendTextEnter">送出並按 Enter</button>
+      <!-- 手機遙控時用最下面的打字列，這段就不顯示 -->
+      <div id="kbText">
+        <p class="section">輸入文字 (直接打到電腦上目前的輸入位置)</p>
+        <textarea id="textIn" placeholder="在這裡打字，按送出" spellcheck="false"></textarea>
+        <div class="row end">
+          <button class="btn" type="button" id="sendText">送出</button>
+          <button class="btn primary" type="button" id="sendTextEnter">送出並按 Enter</button>
+        </div>
       </div>
       <p class="section">修飾鍵 (先點，再點下面的按鍵 = 組合鍵)</p>
       <div class="keys" id="mods">
@@ -275,7 +296,9 @@
 const NTFY = "https://ntfy.sh";
 const STUN = ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"];
 const TRIES = 3;          // 連不上自動重試幾次 (手機網路打洞時好時壞，重新來過常常就通)
+const RECONNECT_TRIES = 5; // 看過畫面之後斷線 (手機切到背景再回來、換網路)：多試幾次，手機網路剛恢復時常常要等一下
 const NO_ANSWER_MS = 15000;
+const NTFY_MS = 10000;    // 連 ntfy 最多等多久 (手機剛從背景回來時網路可能還沒好，沒設的話會一直等)
 const $ = id => document.getElementById(id);
 const enc = new TextEncoder(), dec = new TextDecoder();
 const store = { get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch { return d; } },
@@ -304,6 +327,7 @@ async function decrypt(key, text) {
 
 // ===== 狀態 =====
 let pc = null, es = null, dc = null, filesDc = null, everConnected = false, wakeLock = null;
+let creds = null;         // 這次連線的房間碼 / 密碼 (斷線重連用)
 let caps = null;          // 分享端的能力 {video, control}；舊版分享端不會送 (= null)
 let frameCount = 0, tickFrames = 0, tickBytes = 0, lastFrameAt = 0, lastVideoStats = null;
 let controlOn = false;
@@ -321,10 +345,14 @@ function closePeer() {
   for (const id of ["ctl", "kbBtn", "clipBtn", "fileBtn", "quality", "encoder", "touchMode"]) $(id).classList.add("hidden");
   $("note").classList.add("hidden");
   resetAuto();
+  lastVideoStats = null;   // 新的連線統計從 0 開始算
+  lastFrameAt = 0;         // 重連時顯示「等待畫面…」，不是「N 秒沒有新畫面」
+  probeAt = 0;
 }
 function loginMsg(text, bad) { $("loginMsg").textContent = text || ""; $("loginMsg").className = bad ? "bad" : ""; }
 function showLogin(text, bad) {
   closePeer();
+  creds = null;
   everConnected = false;
   releaseWake();
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -355,9 +383,44 @@ async function requestWake() {
 }
 function releaseWake() { try { if (wakeLock) wakeLock.release(); } catch {} wakeLock = null; }
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && pc && pc.connectionState === "connected") requestWake();
-  if (document.visibilityState === "hidden") send({ t: "release" });   // 切走時放開所有按鍵，避免卡鍵
+  if (document.visibilityState === "hidden") { send({ t: "release" }); return; }   // 切走時放開所有按鍵，避免卡鍵
+  if (pc && pc.connectionState === "connected") requestWake();
+  // 從背景回來：瀏覽器可能把畫面暫停了；連線已經斷了 (電腦那邊幾秒沒回應就會關掉) 就馬上重連，
+  // 看起來還連著的話給 3 秒收電腦的訊息，收不到也重連 (見 watchdog)
+  if (video.srcObject && video.paused) video.play().catch(() => {});
+  heardAt = Math.max(heardAt, performance.now() - silentLimit() + 3000);
+  unstableAt = 0;
+  // 剛回來時收到的畫面 / 訊息可能是在背景時就塞在路上的舊東西，不能證明電腦還在：要等到回來之後送的 ping 有回應
+  if (caps && caps.auto) probeAt = performance.now();
+  if (pc && everConnected && (["disconnected", "failed"].includes(pc.connectionState) || (dc && ["closing", "closed"].includes(dc.readyState))))
+    reconnect("連線中斷，重新連線…");
 });
+
+// ===== 斷線自動重連 =====
+// 手機切到背景一陣子再回來時，電腦那邊早就把連線關了，但手機的瀏覽器常常還以為連著，或一直停在「訊號不穩」等不到「失敗」
+// (以前就卡在黃燈，只能重新整理)。所以自己判斷，不等瀏覽器：
+// - 主通道關了 (電腦關掉了這條連線) → 馬上重連
+// - 一段時間完全沒收到電腦的東西 (新版電腦端每 0.25 秒回一次 pong，畫面每秒至少一張) → 重連
+// - 「訊號不穩」超過 6 秒 → 重連 (電腦那邊這時候已經關掉了，等不回來)
+const UNSTABLE_MS = 6000, PROBE_MS = 3000;
+let heardAt = 0, unstableAt = 0, probeAt = 0;   // probeAt = 從背景回來的時間 (還沒收到之後送的 ping 的回應)
+const silentLimit = () => caps && caps.auto ? 6000 : 20000;   // 舊版電腦端沒有 pong：電腦在 UAC 畫面時可能很久沒有新畫面，放寬
+function heard() { heardAt = performance.now(); }
+function reconnect(why) {
+  if (!creds || !pc || !everConnected) return;
+  progress(why);
+  run(creds.room, creds.pass, 1);
+}
+setInterval(() => {
+  if (!pc || !everConnected || document.visibilityState !== "visible") return;
+  const st = pc.connectionState, now = performance.now(), quiet = now - heardAt;
+  if (st === "new" || st === "connecting") return;   // 正在連 (連不上會自己重試)
+  if (st !== "disconnected") unstableAt = 0;
+  else if (!unstableAt) unstableAt = now;
+  if (dc && ["closing", "closed"].includes(dc.readyState)) reconnect("連線中斷，重新連線…");
+  else if (unstableAt && (quiet > 3000 || now - unstableAt > UNSTABLE_MS)) reconnect("訊號斷了，重新連線…");
+  else if (quiet > silentLimit() || (probeAt && now - probeAt > PROBE_MS)) reconnect("電腦沒有回應，重新連線…");
+}, 1000);
 
 function send(obj) { if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj)); }
 
@@ -448,12 +511,16 @@ setInterval(() => {
 }, 50);
 
 // ===== 連線 =====
+let connectGen = 0;
+const maxTries = () => everConnected ? RECONNECT_TRIES : TRIES;
 async function connect(room, pass, attempt = 1) {
   closePeer();
-  const tag = attempt > 1 ? `（重試 ${attempt - 1}/${TRIES - 1}）` : "";
+  const gen = ++connectGen;
+  const tag = attempt > 1 ? `（重試 ${attempt - 1}/${maxTries() - 1}）` : "";
   const topic = "lash-" + hex(await sha256("lash-topic:" + room)).slice(0, 24);
   const key = await crypto.subtle.importKey("raw", await sha256("lash-key:" + room + ":" + pass), "AES-GCM", false, ["encrypt", "decrypt"]);
   const id = hex(crypto.getRandomValues(new Uint8Array(6)));
+  if (gen !== connectGen || !creds) return;   // 等的時候又開始了另一次連線 / 已經按了中斷
 
   const me = pc = new RTCPeerConnection({ iceServers: [{ urls: STUN }] });
   const cands = { host: 0, srflx: 0 };
@@ -464,6 +531,7 @@ async function connect(room, pass, attempt = 1) {
     const st = me.connectionState;
     if (st === "connected") {
       connected = everConnected = true;
+      heard();
       showViewer();
       setState("ok", "已連線");
       if (!lastFrameAt) overlay("等待畫面…");
@@ -471,9 +539,9 @@ async function connect(room, pass, attempt = 1) {
     } else if (st === "disconnected") {
       setState("warn", "訊號不穩，等待恢復…");
     } else if (st === "failed") {
-      // 連過又斷 (例如手機從 Wi-Fi 換到 4G) 從頭重連；沒連上過就重試到 TRIES 次
+      // 連過又斷 (例如手機從 Wi-Fi 換到 4G) 從頭重連；沒連上過就重試到 maxTries 次
       if (connected) { progress("連線中斷，重新連線…"); run(room, pass, 1); }
-      else if (attempt < TRIES) { progress("連不上，自動重試…"); run(room, pass, attempt + 1); }
+      else if (attempt < maxTries()) { progress("連不上，自動重試…"); run(room, pass, attempt + 1); }
       else fail(cands.srflx ? "連不上：雙方網路不允許直接連線，換個網路再試（例如 Wi-Fi 與行動網路互換）"
                             : "連不上：這台裝置查不到自己的外網位址，換個網路再試");
     }
@@ -497,7 +565,10 @@ async function connect(room, pass, attempt = 1) {
   const ch = dc = me.createDataChannel("screen");
   ch.binaryType = "arraybuffer";
   let frames = new Map(), shown = -1, url = null;
+  // 電腦關掉了這條連線 (例如手機在背景太久，電腦那邊等不到回應)：重連。按了中斷 / 電腦說 bye 的話 pc 已經是 null
+  ch.onclose = () => { if (dc === ch && pc === me && connected && document.visibilityState === "visible") reconnect("連線中斷，重新連線…"); };
   ch.onmessage = e => {
+    heard();
     if (typeof e.data === "string") { onText(ch, JSON.parse(e.data)); return; }
     tickBytes += e.data.byteLength;
     // 一張畫面切成好幾塊：標頭 = 畫面編號 u32、第幾塊 u16、共幾塊 u16 (little endian)
@@ -544,18 +615,31 @@ async function connect(room, pass, attempt = 1) {
     progress("連線中…" + tag);
     await me.setRemoteDescription({ type: "answer", sdp: msg.sdp });
   };
-  await opened;
+  // 連 ntfy 都要有時間限制：手機剛從背景回來時網路常常還沒好，不設的話會一直卡在「等待分享端回應」
+  await Promise.race([opened, new Promise((_, no) => setTimeout(() => no(new Error("連不上 ntfy.sh (交換連線碼用)，請檢查網路")), NTFY_MS))]);
   if (pc !== me) return;
   const body = await encrypt(key, { t: "offer", id, sdp: me.localDescription.sdp, v: 2, ua: navigator.userAgent });
-  await fetch(`${NTFY}/${topic}`, { method: "POST", body });
+  const ctl = new AbortController(), stop = setTimeout(() => ctl.abort(), NTFY_MS);
+  try { await fetch(`${NTFY}/${topic}`, { method: "POST", body, signal: ctl.signal }); }
+  catch (e) { throw new Error(ctl.signal.aborted ? "連不上 ntfy.sh (交換連線碼用)，請檢查網路" : "連不上 ntfy.sh：" + e.message); }
+  finally { clearTimeout(stop); }
+  if (pc !== me) return;
   setTimeout(() => {
     if (pc === me && me.connectionState === "new") fail("分享端沒有回應：程式沒有開，或房間碼 / 密碼不對");
   }, NO_ANSWER_MS);
 }
-const run = (room, pass, attempt) => connect(room, pass, attempt).catch(e => { if (pc) fail("錯誤：" + e.message); });
+// 連線過程出錯 (多半是網路還沒好、連不上 ntfy)：等一下再試，試到 maxTries 次才回到連線畫面
+const run = (room, pass, attempt) => connect(room, pass, attempt).catch(e => {
+  if (!pc || !creds) return;   // 已經中斷了
+  if (attempt >= maxTries()) { fail("錯誤：" + e.message); return; }
+  progress("連線失敗，自動重試…");
+  const p = pc;
+  setTimeout(() => { if (pc === p && creds) run(room, pass, attempt + 1); }, 1500);
+});
 
 function gotFrame(n) {
   frameCount += n; tickFrames += n; lastFrameAt = Date.now();
+  heard();
   if (!$("overlay").classList.contains("hidden") && pc && pc.connectionState === "connected") overlay("");
 }
 
@@ -589,6 +673,7 @@ function onText(ch, m) {
       if (m.control && store.get("lash-control", "0") === "1") setControl(true, true);
       break;
     case "pong":
+      if (probeAt && m.ts >= probeAt) probeAt = 0;   // 從背景回來之後送的 ping 有回應：連線還活著
       if (performance.now() < busyUntil || performance.now() - busyTick > 75) break;   // 這一頁剛剛卡住 (或現在還卡著)，量到的不準
       pings.push({ at: Date.now(), ms: performance.now() - m.ts });
       while (pings.length && Date.now() - pings[0].at > 30000) pings.shift();
@@ -611,6 +696,7 @@ function start() {
   const room = $("room").value.trim().toUpperCase(), pass = $("pass").value.trim().toUpperCase();
   if (!room || !pass) { loginMsg("請輸入房間碼與密碼", true); return; }
   store.set("lash-room", room);
+  creds = { room, pass };
   $("go").disabled = true;
   $("go").textContent = "連線中…";
   everConnected = false; frameCount = 0; lastFrameAt = 0; lastVideoStats = null;
@@ -686,6 +772,7 @@ function setControl(on, quiet) {
   stage.classList.toggle("control", controlOn);
   $("ctl").classList.toggle("on", controlOn);
   if (!quiet) store.set("lash-control", controlOn ? "1" : "0");
+  showTypeBar();
   if (controlOn) {
     stage.focus({ preventScroll: true });
     if (!quiet) toast(isTouch ? touchHelp()
@@ -776,9 +863,10 @@ const touchMode = $("touchMode");
 touchMode.value = store.get("lash-touch", "abs");
 if (!touchMode.value) touchMode.value = "abs";
 const relative = () => touchMode.value === "rel";
-const touchHelp = () => relative()
+const touchHelp = () => (relative()
   ? "遙控中 (相對座標)：一指滑動 = 移動游標 (放大時畫面跟著游標走)、點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動、兩指捏合 = 放大縮小"
-  : "遙控中：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動、兩指捏合 = 放大縮小";
+  : "遙控中：點一下 = 左鍵、兩指點 = 右鍵、長按後拖曳 = 拖曳、兩指上下滑 = 捲動、兩指捏合 = 放大縮小")
+  + "。最下面可以直接打字送到電腦";
 touchMode.onchange = () => { store.set("lash-touch", touchMode.value); if (controlOn) toast(touchHelp(), 5000); };
 
 // --- 兩指捏合放大 (遙控中的觸控；瀏覽器自己的放大在遙控中是關掉的)：跟 Google 遠端桌面一樣，
@@ -803,15 +891,25 @@ function resetZoom() {
   zoom = 1; zoomBase = null;
   for (const el of [video, img]) for (const k of ["width", "height", "maxWidth", "maxHeight", "flex", "objectFit"]) el.style[k] = "";
 }
-window.addEventListener("resize", () => { if (zoom !== 1) resetZoom(); });   // 轉向 / 視窗大小變了：原本放大前的大小不準了
+// 轉向 / 視窗寬度變了：原本放大前的大小不準了，回到不放大。只有高度變 (手機鍵盤跳出來 / 收起來) 的話照舊，不然打個字放大就不見了
+let zoomW = innerWidth;
+window.addEventListener("resize", () => { if (innerWidth !== zoomW) { zoomW = innerWidth; if (zoom !== 1) resetZoom(); } });
 function spread() { const [a, b] = [...touches.values()]; return a && b ? Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) : 0; }
 
-// 相對座標：手指在畫面上移動 (dx, dy) → 游標移動；游標跑到看不到的地方就捲動畫面跟過去
+// 相對座標：手指移動 → 游標移動，加速看手指的「速度」：慢慢滑可以點得準，快速滑可以一下移很遠。
+// 以前看的是每次觸控事件之間移動的距離，但事件的間隔不固定 (手機忙的時候兩次併成一次)，同樣的速度一下加速一下不加速，游標就一頓一頓的
+function relMove(g, e) {
+  const dx = e.clientX - g.last.x, dy = e.clientY - g.last.y, dt = Math.min(100, Math.max(4, e.timeStamp - g.lastT));
+  g.v += (Math.hypot(dx, dy) / dt - g.v) * (1 - Math.exp(-dt / 40));   // px/ms，平滑過 (約 40 ms)
+  g.last = { x: e.clientX, y: e.clientY }; g.lastT = e.timeStamp;
+  const k = 1 + Math.min(2, Math.max(0, g.v - 0.05) * 1.4);
+  return moveCursor(dx * k, dy * k);
+}
+// 游標移動 (dx, dy) 個螢幕上的點；游標跑到看不到的地方就捲動畫面跟過去
 function moveCursor(dx, dy) {
   const s = shown();
   if (!s) return cursor;
-  const k = 1 + Math.min(2, Math.hypot(dx, dy) / 12);   // 加速：慢慢滑可以點得準，快速滑可以一下移很遠
-  queueMove({ x: clamp01(cursor.x + dx * k / s.w), y: clamp01(cursor.y + dy * k / s.h) });
+  queueMove({ x: clamp01(cursor.x + dx / s.w), y: clamp01(cursor.y + dy / s.h) });
   const cx = s.left + cursor.x * s.w, cy = s.top + cursor.y * s.h, r = stage.getBoundingClientRect(), m = 40;
   if (cx < r.left + m) stage.scrollLeft -= r.left + m - cx; else if (cx > r.right - m) stage.scrollLeft += cx - (r.right - m);
   if (cy < r.top + m) stage.scrollTop -= r.top + m - cy; else if (cy > r.bottom - m) stage.scrollTop += cy - (r.bottom - m);
@@ -837,7 +935,7 @@ function touchDown(e) {
   if (touches.size === 1) {
     const p = relative() ? { ...cursor } : toRemote(e);
     if (!p) return;
-    gesture = { kind: "tap", start: { x: e.clientX, y: e.clientY }, last: { x: e.clientX, y: e.clientY }, p, t0: Date.now() };
+    gesture = { kind: "tap", start: { x: e.clientX, y: e.clientY }, last: { x: e.clientX, y: e.clientY }, lastT: e.timeStamp, v: 0, p, t0: Date.now() };
     gesture.timer = setTimeout(() => {
       if (!gesture || gesture.kind !== "tap") return;
       gesture.kind = "drag";
@@ -883,16 +981,18 @@ function touchMove(e) {
     if (dy) { send({ t: "wh", dx: 0, dy }); gesture.acc -= dy; }
     return;
   }
-  if (gesture.kind === "tap" && Math.hypot(e.clientX - gesture.start.x, e.clientY - gesture.start.y) > 10) {
+  if (gesture.kind === "tap") {
+    // 手指移動超過 10 點才算滑動 (不然是點一下)。相對座標從手指離開這 10 點的地方開始算：
+    // 以前把這 10 點一次補上去、還加速，剛開始滑的那一下游標會暴衝
+    const dist = Math.hypot(e.clientX - gesture.start.x, e.clientY - gesture.start.y);
+    if (dist <= 10) { gesture.lastT = e.timeStamp; return; }
     clearTimeout(gesture.timer);
     gesture.kind = "move";
+    const f = 10 / dist;
+    gesture.last = { x: gesture.start.x + (e.clientX - gesture.start.x) * f, y: gesture.start.y + (e.clientY - gesture.start.y) * f };
   }
   if (gesture.kind !== "move" && gesture.kind !== "drag") return;
-  if (relative()) {
-    gesture.p = moveCursor(e.clientX - gesture.last.x, e.clientY - gesture.last.y);
-    gesture.last = { x: e.clientX, y: e.clientY };
-    return;
-  }
+  if (relative()) { gesture.p = relMove(gesture, e); return; }
   const p = toRemote(e);
   if (!p) return;
   gesture.p = p;
@@ -993,7 +1093,32 @@ function sendText(enter) {
 }
 $("sendText").onclick = () => sendText(false);
 $("sendTextEnter").onclick = () => sendText(true);
-$("kbHelp").textContent = "Ctrl+Alt+Del、鎖定畫面、UAC 確認視窗是 Windows 的安全畫面，遠端沒辦法操作。";
+
+// --- 手機遙控：最下面的打字列 (像 Google 遠端桌面，不用先開鍵盤面板) ---
+// 打好字按「送出」或手機鍵盤的送出鍵 → 打到電腦上；輸入框是空的時候按送出鍵 = Enter、按刪除鍵 = Backspace。
+// 組合鍵 (Ctrl、Alt、F1~F12…) 才開鍵盤面板，那邊的文字輸入就不顯示了
+const typeIn = $("typeIn");
+const typeBarOn = () => controlOn && isTouch;
+function showTypeBar() {
+  $("typeBar").classList.toggle("hidden", !typeBarOn());
+  $("kbText").classList.toggle("hidden", typeBarOn());
+}
+function typeText() {
+  const t = typeIn.value;
+  if (!t || !dc || dc.readyState !== "open") return;
+  dc.send(JSON.stringify({ t: "text", s: t.slice(0, 60000) }));
+  typeIn.value = "";
+}
+$("typeBar").onsubmit = e => { e.preventDefault(); if (typeIn.value) typeText(); else pressKeys(["Enter"]); };
+$("typeEnter").onclick = () => { typeText(); pressKeys(["Enter"]); };
+$("typeBack").onclick = () => pressKeys(["Backspace"]);
+$("typeKeys").onclick = () => openSheet("kbSheet");
+typeIn.addEventListener("keydown", e => {
+  if (e.key === "Backspace" && !typeIn.value && !e.isComposing) { e.preventDefault(); pressKeys(["Backspace"]); }
+});
+// 按打字列的按鈕時不要讓輸入框失去焦點 (手機鍵盤會收起來，要一直重新點輸入框)
+for (const b of $("typeBar").querySelectorAll("button")) for (const ev of ["pointerdown", "mousedown"]) b.addEventListener(ev, e => e.preventDefault());
+$("kbHelp").textContent = "UAC 確認視窗、鎖定畫面、登入畫面要電腦端用「系統服務模式」才能操作；Ctrl+Alt+Del 不能從遠端送。";
 
 // --- 剪貼簿 ---
 function gotPcClip(text) {
